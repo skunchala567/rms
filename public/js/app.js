@@ -7,27 +7,27 @@
     { path: 'dashboard', label: 'Dashboard', icon: 'dashboard', page: 'dashboard' },
     { path: 'students', label: 'Students', icon: 'students', page: 'students' },
     { path: 'trips', label: '5 PM Trips', icon: 'clock', page: 'trips' },
-    { path: 'buses', label: 'Buses', icon: 'bus', page: 'buses', inchargeOnly: true },
+    { path: 'buses', label: 'Buses', icon: 'bus', page: 'buses' },
     { path: 'route-assignment', label: 'Route Assignment', icon: 'route', page: 'routeAssignment' },
-    { path: 'route-replacement', label: 'Route Replacement', icon: 'replace', page: 'routeReplacement', inchargeOnly: true },
-    { path: 'notifications', label: 'Notifications', icon: 'message', page: 'notifications', inchargeOnly: true },
+    { path: 'route-replacement', label: 'Route Replacement', icon: 'replace', page: 'routeReplacement' },
+    { path: 'notifications', label: 'Notifications', icon: 'message', page: 'notifications' },
     { path: 'reports', label: 'Reports', icon: 'reports', page: 'reports' },
-    { path: 'users', label: 'Users', icon: 'shield', page: 'users', inchargeOnly: true },
+    { path: 'settings', label: 'Settings', icon: 'settings', page: 'settings' },
   ];
 
   function parseHash() {
-    const raw = (location.hash || '#/dashboard').slice(2); // remove '#/'
+    const raw = (location.hash || '#/dashboard').slice(2);
     const [path, qs] = raw.split('?');
     const query = {};
     new URLSearchParams(qs || '').forEach((v, k) => { query[k] = v; });
     return { path: path || 'dashboard', query };
   }
 
-  function navItemsFor(role) {
-    return NAV.filter((n) => !n.inchargeOnly || role === 'transport_incharge');
+  function navItemsFor(user) {
+    const access = Array.isArray(user.access) ? user.access : [];
+    return NAV.filter((n) => user.role === 'transport_incharge' || access.includes(n.path));
   }
 
-  // ---------- Login ----------
   function renderLogin() {
     appEl.innerHTML = `
       <div class="login-wrap"><div class="login-card">
@@ -62,10 +62,10 @@
     });
   }
 
-  // ---------- App shell ----------
   function renderShell() {
     const user = API.getUser();
-    const items = navItemsFor(user.role);
+    const items = navItemsFor(user);
+    const roleName = user.roleName || user.role;
     appEl.innerHTML = `
       <div class="app-shell">
         <aside class="sidebar" id="sidebar">
@@ -74,7 +74,7 @@
             <div class="nav-section">Main</div>
             ${items.map((n) => `<div class="nav-item" data-path="${n.path}">${Icons.svg(n.icon, 19)}${esc(n.label)}</div>`).join('')}
           </nav>
-          <div class="foot">${Icons.svg('shield', 15)} v1.0 · ${esc(user.role === 'transport_incharge' ? 'Transport Incharge' : 'Data Entry')}</div>
+          <div class="foot">${Icons.svg('shield', 15)} v1.0 - ${esc(roleName)}</div>
         </aside>
         <div class="main">
           <header class="topbar">
@@ -83,7 +83,7 @@
             <div class="user-chip" id="user-chip" title="Account">
               <div class="meta">
                 <div class="nm">${esc(user.name)}</div>
-                <div class="role">${esc(user.role === 'transport_incharge' ? 'Transport Incharge' : 'Data Entry User')}</div>
+                <div class="role">${esc(roleName)}</div>
               </div>
               <div class="avatar">${esc((user.name || 'U').charAt(0).toUpperCase())}</div>
               <span class="chip-caret">${Icons.svg('chevDown', 16)}</span>
@@ -110,6 +110,7 @@
       document.querySelector('.app-shell').appendChild(bd);
     } else closeSidebar();
   }
+
   function closeSidebar() {
     document.getElementById('sidebar')?.classList.remove('open');
     document.getElementById('backdrop')?.remove();
@@ -122,12 +123,12 @@
 
   function showAccountMenu(e) {
     if (e) e.stopPropagation();
-    // toggle
     if (document.getElementById('account-menu')) { closeAccountMenu(); return; }
 
     const u = API.getUser();
     const chip = document.getElementById('user-chip');
     const rect = chip.getBoundingClientRect();
+    const roleName = u.roleName || u.role;
 
     const overlay = document.createElement('div');
     overlay.id = 'account-overlay';
@@ -143,7 +144,7 @@
         <div class="avatar">${esc((u.name || 'U').charAt(0).toUpperCase())}</div>
         <div class="dd-id">
           <div class="dd-name">${esc(u.name)}</div>
-          <div class="dd-sub">@${esc(u.username)} · ${esc(u.role === 'transport_incharge' ? 'Transport Incharge' : 'Data Entry User')}</div>
+          <div class="dd-sub">@${esc(u.username)} - ${esc(roleName)}</div>
         </div>
       </div>
       <button class="dd-item" id="acc-pw">${Icons.svg('lock', 16)} Change Password</button>
@@ -159,7 +160,6 @@
     });
   }
 
-  // ---------- Router ----------
   let shellRendered = false;
   async function route() {
     if (!API.getToken()) { shellRendered = false; renderLogin(); return; }
@@ -167,9 +167,8 @@
 
     const { path, query } = parseHash();
     const user = API.getUser();
-    const nav = navItemsFor(user.role).find((n) => n.path === path);
+    const nav = navItemsFor(user).find((n) => n.path === path);
 
-    // Default / unknown / unauthorized -> dashboard
     if (!nav) {
       if (path === 'login') { location.hash = '#/dashboard'; return; }
       location.hash = '#/dashboard';
@@ -190,26 +189,29 @@
   }
 
   function renderApp() { route(); }
-
   window.addEventListener('hashchange', route);
 
-  // ---------- Session check on load ----------
   async function boot() {
     if (API.getToken()) {
-      try { await API.get('/auth/me'); }
-      catch (e) { if (e.status === 401) { API.clearSession(); } }
+      try {
+        const res = await API.get('/auth/me');
+        const current = API.getUser() || {};
+        API.setSession(API.getToken(), { ...current, ...res.user });
+      } catch (e) {
+        if (e.status === 401) API.clearSession();
+      }
     }
     if (!location.hash) location.hash = API.getToken() ? '#/dashboard' : '#/login';
     route();
   }
 
-  // ---------- PWA install ----------
   let deferredPrompt = null;
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     deferredPrompt = e;
     showInstallBanner();
   });
+
   function showInstallBanner() {
     if (document.getElementById('install-banner')) return;
     const b = document.createElement('div');
@@ -228,7 +230,6 @@
     b.querySelector('#dismiss-install').addEventListener('click', () => b.remove());
   }
 
-  // ---------- Offline indicator ----------
   function updateOnline() {
     document.getElementById('offline-bar').classList.toggle('hidden', navigator.onLine);
   }

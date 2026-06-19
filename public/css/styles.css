@@ -273,6 +273,95 @@ button { font-family: inherit; cursor: pointer; }
 .input-icon .ic { position: absolute; left: 12px; color: var(--text-soft); pointer-events: none; }
 .input-icon input { padding-left: 38px; width: 100%; }
 
+/* ---------- Notification sender ---------- */
+.notif-card { padding: 20px; }
+.notif-control-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 14px 16px;
+  align-items: end;
+  margin-bottom: 18px;
+}
+.notif-field label,
+.notif-panel-head label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  margin-bottom: 7px;
+  text-transform: uppercase;
+}
+.notif-field select {
+  width: 100%;
+  height: 42px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.notif-field select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(183,157,110,.18);
+}
+.notif-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.notif-route-panel {
+  grid-column: 1 / -1;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 14px 16px 16px;
+}
+.notif-panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.notif-panel-head span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.route-chip-grid {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.route-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ch-700);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
+}
+.route-chip:hover { border-color: var(--sand-400); box-shadow: var(--shadow-xs); }
+.route-chip input { width: 15px; height: 15px; margin: 0; }
+.route-chip.selected {
+  background: var(--ch-700);
+  border-color: var(--ch-700);
+  color: var(--sand-100);
+}
+
 /* ---------- Tables ---------- */
 .table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-xs); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -392,4 +481,8 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--charcoal
   .topbar { padding: 0 16px; }
   .user-chip .meta { display: none; }
   .backdrop { position: fixed; inset: 0; background: rgba(43,43,43,.5); z-index: 35; }
+  .notif-control-panel { grid-template-columns: 1fr; }
+  .notif-actions { justify-content: stretch; }
+  .notif-actions .btn { flex: 1; }
+  .route-chip { flex: 1 1 86px; justify-content: center; }
 }

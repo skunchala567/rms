@@ -2,11 +2,12 @@
 
 const express = require('express');
 const db = require('../db/database');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requirePageAccess } = require('../middleware/auth');
 const { buildWorkbook } = require('../services/excel');
 
 const router = express.Router();
 router.use(authenticate);
+router.use(requirePageAccess('reports'));
 
 async function busForRoute(route) {
   if (!route) return null;

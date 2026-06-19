@@ -2,11 +2,12 @@
 
 const express = require('express');
 const db = require('../db/database');
-const { authenticate, transportInchargeOnly } = require('../middleware/auth');
+const { authenticate, requirePageAccess } = require('../middleware/auth');
 const whatsapp = require('../services/whatsapp');
 
 const router = express.Router();
 router.use(authenticate);
+router.use(requirePageAccess('notifications'));
 
 async function busForRoute(route) {
   if (!route) return null;
@@ -18,8 +19,20 @@ router.get('/preview', async (req, res, next) => {
   try {
     const scope = req.query.scope || 'trip';
     let students = [];
-    if (scope === 'route' && req.query.route) {
-      students = await db.prepare(`SELECT * FROM students WHERE route_number = ? AND status='Active' ORDER BY name`).all(req.query.route);
+    if (scope === 'route') {
+      const selectedRoutes = []
+        .concat(req.query.routes || req.query.route || [])
+        .flatMap((value) => String(value || '').split(','))
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const routes = [...new Set(selectedRoutes)];
+      if (routes.length) {
+        const placeholders = routes.map(() => '?').join(',');
+        students = await db.query(
+          `SELECT * FROM students WHERE route_number IN (${placeholders}) AND status='Active' ORDER BY route_number, name`,
+          routes
+        );
+      }
     } else {
       const date = String(req.query.date || new Date().toISOString().slice(0, 10));
       students = await db.prepare(`
@@ -30,12 +43,15 @@ router.get('/preview', async (req, res, next) => {
     const data = [];
     for (const s of students) {
       const bus = await busForRoute(s.route_number);
+      const destination = whatsapp.formatNumber(s.parent_mobile);
+      const mobileReady = whatsapp.isValidDestination(destination);
       data.push({
         student_id: s.id, student_code: s.student_code, name: s.name,
         route_number: s.route_number, mobile: s.parent_mobile,
         bus_number: bus ? bus.bus_number : null,
         tracking_link: bus ? bus.gps_link : null,
-        ready: !!s.parent_mobile && !!bus,
+        ready: mobileReady && !!bus,
+        reason: !mobileReady ? 'Invalid or missing mobile number' : (!bus ? 'No active bus for route' : ''),
       });
     }
     res.json({ enabled: whatsapp.isEnabled(), count: data.length, data });
@@ -43,7 +59,7 @@ router.get('/preview', async (req, res, next) => {
 });
 
 // POST /api/notifications/send  (transport incharge only)
-router.post('/send', transportInchargeOnly, async (req, res, next) => {
+router.post('/send', requirePageAccess('notifications'), async (req, res, next) => {
   try {
     const ids = Array.isArray(req.body.studentIds) ? req.body.studentIds : [];
     if (!ids.length) return res.status(400).json({ error: 'No students selected.' });
@@ -82,7 +98,7 @@ router.post('/send', transportInchargeOnly, async (req, res, next) => {
 });
 
 // POST /api/notifications/resend/:logId  (transport incharge only)
-router.post('/resend/:logId', transportInchargeOnly, async (req, res, next) => {
+router.post('/resend/:logId', requirePageAccess('notifications'), async (req, res, next) => {
   try {
     const log = await db.prepare('SELECT * FROM notification_log WHERE id = ?').get(req.params.logId);
     if (!log) return res.status(404).json({ error: 'Log entry not found.' });

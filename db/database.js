@@ -169,7 +169,61 @@ async function init() {
   for (const stmt of statements) {
     await pool.query(stmt);
   }
+  await runMigrations();
   return module.exports;
+}
+
+async function tableExists(name) {
+  const row = await _get(pool, `
+    SELECT COUNT(*) AS c
+    FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+  `, [name]);
+  return Number(row.c) > 0;
+}
+
+async function columnType(table, column) {
+  const row = await _get(pool, `
+    SELECT COLUMN_TYPE AS column_type
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
+  `, [table, column]);
+  return row ? row.column_type : '';
+}
+
+async function runMigrations() {
+  if (await tableExists('users')) {
+    const roleType = String(await columnType('users', 'role') || '').toLowerCase();
+    if (roleType.startsWith('enum(')) {
+      await pool.query('ALTER TABLE users MODIFY role VARCHAR(80) NOT NULL');
+    }
+  }
+
+  await seedRolesAndPermissions();
+}
+
+async function seedRolesAndPermissions() {
+  const roles = [
+    ['transport_incharge', 'Transport Incharge', 1],
+    ['data_entry', 'Data Entry User', 1],
+  ];
+  for (const role of roles) {
+    await pool.query(`
+      INSERT INTO roles (role_key, role_name, is_system, status)
+      VALUES (?, ?, ?, 'Active')
+      ON DUPLICATE KEY UPDATE role_name = VALUES(role_name), is_system = VALUES(is_system)
+    `, role);
+  }
+
+  const defaults = {
+    transport_incharge: ['dashboard', 'students', 'trips', 'buses', 'route-assignment', 'route-replacement', 'notifications', 'reports', 'settings'],
+    data_entry: ['dashboard', 'students', 'trips', 'route-assignment', 'reports'],
+  };
+  for (const [roleKey, pages] of Object.entries(defaults)) {
+    for (const page of pages) {
+      await pool.query('INSERT IGNORE INTO role_permissions (role_key, page_key) VALUES (?, ?)', [roleKey, page]);
+    }
+  }
 }
 
 module.exports = makeApi({ query: (...a) => pool.query(...a) });

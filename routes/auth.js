@@ -3,7 +3,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const db = require('../db/database');
-const { signToken, authenticate } = require('../middleware/auth');
+const { signToken, authenticate, hydrateUserAccess } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -14,17 +14,30 @@ router.post('/login', async (req, res, next) => {
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password are required.' });
     }
-    const user = await db.prepare('SELECT * FROM users WHERE username = ?').get(String(username).trim());
+    const user = await db.prepare(`
+      SELECT u.*, r.role_name
+      FROM users u
+      LEFT JOIN roles r ON r.role_key = u.role
+      WHERE u.username = ?
+    `).get(String(username).trim());
     if (!user || user.status !== 'Active') {
       return res.status(401).json({ error: 'Invalid credentials or inactive account.' });
     }
     if (!bcrypt.compareSync(password, user.password_hash)) {
       return res.status(401).json({ error: 'Invalid credentials.' });
     }
-    const token = signToken(user);
+    const hydrated = await hydrateUserAccess(user);
+    const token = signToken(hydrated);
     res.json({
       token,
-      user: { id: user.id, username: user.username, name: user.full_name, role: user.role },
+      user: {
+        id: hydrated.id,
+        username: hydrated.username,
+        name: hydrated.full_name,
+        role: hydrated.role,
+        roleName: hydrated.role_name || hydrated.role,
+        access: hydrated.access,
+      },
     });
   } catch (err) { next(err); }
 });
@@ -32,10 +45,25 @@ router.post('/login', async (req, res, next) => {
 // GET /api/auth/me
 router.get('/me', authenticate, async (req, res, next) => {
   try {
-    const user = await db.prepare('SELECT id, username, full_name AS name, role FROM users WHERE id = ?')
+    const user = await db.prepare(`
+      SELECT u.id, u.username, u.full_name, u.full_name AS name, u.role, r.role_name
+      FROM users u
+      LEFT JOIN roles r ON r.role_key = u.role
+      WHERE u.id = ?
+    `)
       .get(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found.' });
-    res.json({ user });
+    const hydrated = await hydrateUserAccess(user);
+    res.json({
+      user: {
+        id: hydrated.id,
+        username: hydrated.username,
+        name: hydrated.name,
+        role: hydrated.role,
+        roleName: hydrated.role_name || hydrated.role,
+        access: hydrated.access,
+      },
+    });
   } catch (err) { next(err); }
 });
 

@@ -11,12 +11,18 @@
   function field(label, inner, required) {
     return `<div class="field"><label>${esc(label)}${required ? ' <span class="req">*</span>' : ''}</label>${inner}</div>`;
   }
+  function optionValues(rows) {
+    return (rows || []).filter((r) => r.status !== 'Inactive').map((r) => r.value);
+  }
+  async function getStudentSettings() {
+    return API.get('/settings/student-options');
+  }
 
   // ============================ DASHBOARD ============================
   async function dashboard(c) {
     c.innerHTML = spinner();
     const s = await API.get('/dashboard/summary');
-    const canSend = API.isIncharge();
+    const canSend = API.canAccess('notifications');
     c.innerHTML = `
       <div class="section-head"><div><h2>Welcome back</h2><div class="sub">Here's today's stay-back transport overview.</div></div></div>
       <div class="cards">
@@ -126,7 +132,7 @@
     catch (e) { grid.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
 
     if (!res.data.length) { grid.innerHTML = '<div class="empty">No students found.</div>'; updatePager(c, res); return; }
-    const incharge = API.isIncharge();
+    const incharge = API.canAccess('buses');
     const sortIcon = (col) => studentState.sort === col ? (studentState.dir === 'asc' ? ' ▲' : ' ▼') : '';
     grid.innerHTML = `
       <div class="table-wrap"><table>
@@ -202,23 +208,30 @@
     pager.querySelector('#next').addEventListener('click', () => { studentState.page++; loadStudents(c); });
   }
 
-  function studentForm(c, student) {
+  async function studentForm(c, student) {
     const editing = !!student;
     const s = student || {};
+    let settings;
+    try { settings = await getStudentSettings(); }
+    catch (e) { toast(e.message, 'error'); return; }
+    const classOptions = optionValues(settings.class);
+    const sectionOptions = optionValues(settings.section);
+    const categoryOptions = optionValues(settings.category);
+    const routeOptions = optionValues(settings.route);
     modal({
       title: editing ? 'Edit Student' : 'Add Student',
       size: 'lg',
       body: `<form id="stu-form">
         <div class="form-grid">
-          ${field('Student ID', `<input name="student_code" value="${esc(s.student_code || '')}" required>`, true)}
-          ${field('Student Name', `<input name="name" value="${esc(s.name || '')}" required>`, true)}
-          ${field('Class', `<input name="class" value="${esc(s.class || '')}">`)}
-          ${field('Section', `<input name="section" value="${esc(s.section || '')}">`)}
-          ${field('Category of Drop', `<select name="category"><option value="">-- Select --</option>${options(CATEGORIES, s.category)}</select>`)}
-          ${field('Parent Name', `<input name="parent_name" value="${esc(s.parent_name || '')}">`)}
-          ${field('Parent Mobile Number', `<input name="parent_mobile" value="${esc(s.parent_mobile || '')}">`)}
-          ${field('Current Route Number', `<input name="route_number" value="${esc(s.route_number || '')}">`)}
-          ${field('Status', `<select name="status">${options(['Active', 'Inactive'], s.status || 'Active')}</select>`)}
+          ${field('Student ID', `<input name="student_code" value="${esc(s.student_code || '')}" maxlength="50" pattern="[A-Za-z0-9][A-Za-z0-9_/-]*" title="Use letters, numbers, slash, hyphen, or underscore." required>`, true)}
+          ${field('Student Name', `<input name="name" value="${esc(s.name || '')}" minlength="2" maxlength="150" pattern="[A-Za-z .'-]*[A-Za-z][A-Za-z .'-]*" title="Use letters, spaces, dot, apostrophe, or hyphen." required>`, true)}
+          ${field('Class', `<select name="class" required><option value="">-- Select --</option>${options(classOptions, s.class)}</select>`, true)}
+          ${field('Section', `<select name="section" required><option value="">-- Select --</option>${options(sectionOptions, s.section)}</select>`, true)}
+          ${field('Category of Drop', `<select name="category" required><option value="">-- Select --</option>${options(categoryOptions, s.category)}</select>`, true)}
+          ${field('Parent Name', `<input name="parent_name" value="${esc(s.parent_name || '')}" minlength="2" maxlength="150" pattern="[A-Za-z .'-]*[A-Za-z][A-Za-z .'-]*" title="Use letters, spaces, dot, apostrophe, or hyphen." required>`, true)}
+          ${field('Parent Mobile Number', `<input name="parent_mobile" type="tel" inputmode="numeric" value="${esc(s.parent_mobile || '')}" pattern="(?:\\+?91|0)?[6-9][0-9]{9}" title="Enter a valid 10-digit Indian mobile number." required>`, true)}
+          ${field('Current Route Number', `<select name="route_number"><option value="">Awaiting Route Assignment</option>${options(routeOptions, s.route_number)}</select>`)}
+          ${field('Status', `<select name="status" required>${options(['Active', 'Inactive'], s.status || 'Active')}</select>`, true)}
         </div>
       </form>`,
       footer: `<button class="btn secondary" data-close>Cancel</button>
@@ -226,7 +239,8 @@
       onMount: (el, close) => {
         el.querySelector('#save-stu').addEventListener('click', async () => {
           const form = el.querySelector('#stu-form');
-          const data = Object.fromEntries(new FormData(form).entries());
+          if (!form.reportValidity()) return;
+          const data = Object.fromEntries([...new FormData(form).entries()].map(([k, v]) => [k, String(v).trim()]));
           const btn = el.querySelector('#save-stu');
           btn.disabled = true;
           try {
@@ -428,7 +442,7 @@
 
   // ============================ BUSES ============================
   async function buses(c) {
-    const incharge = API.isIncharge();
+    const incharge = API.canAccess('buses');
     c.innerHTML = `
       <div class="section-head"><h2>Bus Management</h2>
         ${incharge ? `<button class="btn" id="btn-add-bus">${Icons.svg('plus', 16)} Add Bus</button>` : ''}</div>
@@ -439,7 +453,7 @@
   async function loadBuses(c) {
     const grid = c.querySelector('#bus-grid');
     const list = await API.get('/buses');
-    const incharge = API.isIncharge();
+    const incharge = API.canAccess('buses');
     if (!list.length) { grid.innerHTML = '<div class="empty">No buses configured yet.</div>'; return; }
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th>Bus No</th><th>Route No</th><th>Capacity</th><th>Occupied</th><th>Available</th><th>Occupancy</th><th>Driver</th><th>Tracking</th><th>Status</th>${incharge ? '<th>Actions</th>' : ''}</tr></thead>
@@ -494,7 +508,7 @@
   const assignState = { selected: new Set(), filters: {} };
   async function routeAssignment(c) {
     assignState.selected.clear();
-    const incharge = API.isIncharge();
+    const incharge = API.canAccess('route-assignment');
     c.innerHTML = `
       <div class="section-head"><h2>Route Assignment</h2></div>
       <div class="card"><h2>Route Occupancy</h2><div id="occ">${spinner()}</div></div>
@@ -672,20 +686,45 @@
   }
   async function renderSend(content) {
     content.innerHTML = `
-      <div class="card">
-        <div class="toolbar">
-          <select id="n-scope"><option value="trip">Today's 5 PM Trip students</option><option value="route">By Route</option></select>
-          <select id="n-route" class="hidden"></select>
-          <button class="btn secondary" id="n-refresh">Load</button>
-          <button class="btn success" id="n-send" disabled>${Icons.svg('send', 16)} Send Route Notification</button>
+      <div class="card notif-card">
+        <div class="notif-control-panel">
+          <div class="notif-field">
+            <label>Audience</label>
+            <select id="n-scope"><option value="trip">Today's 5 PM Trip students</option><option value="route">By Route</option></select>
+          </div>
+          <div class="notif-actions">
+            <button class="btn secondary" id="n-refresh">${Icons.svg('refresh', 16)} Load</button>
+            <button class="btn success" id="n-send" disabled>${Icons.svg('send', 16)} Send Route Notification</button>
+          </div>
+          <div class="notif-route-panel hidden" id="n-route-panel">
+            <div class="notif-panel-head">
+              <label>Routes</label>
+              <span id="n-route-count">0 selected</span>
+            </div>
+            <div class="route-chip-grid" id="n-route-list"></div>
+          </div>
         </div>
         <div id="n-status"></div>
         <div id="n-grid">${spinner()}</div>
       </div>`;
     const routes = await API.get('/routes/list');
-    content.querySelector('#n-route').innerHTML = options(routes, '', true, 'Select Route');
+    const routeList = content.querySelector('#n-route-list');
+    routeList.innerHTML = routes.map((route) => `
+      <label class="route-chip">
+        <input type="checkbox" value="${esc(route)}">
+        <span>${esc(route)}</span>
+      </label>`).join('');
+    const updateRouteCount = () => {
+      const count = routeList.querySelectorAll('input:checked').length;
+      content.querySelector('#n-route-count').textContent = `${count} selected`;
+      routeList.querySelectorAll('.route-chip').forEach((chip) => {
+        chip.classList.toggle('selected', chip.querySelector('input').checked);
+      });
+    };
+    routeList.querySelectorAll('input').forEach((cb) => cb.addEventListener('change', updateRouteCount));
     content.querySelector('#n-scope').addEventListener('change', (e) => {
-      content.querySelector('#n-route').classList.toggle('hidden', e.target.value !== 'route');
+      content.querySelector('#n-route-panel').classList.toggle('hidden', e.target.value !== 'route');
+      updateRouteCount();
     });
     content.querySelector('#n-refresh').addEventListener('click', () => loadNotifPreview(content));
     content.querySelector('#n-send').addEventListener('click', () => sendNotifs(content));
@@ -696,13 +735,22 @@
     const grid = content.querySelector('#n-grid');
     grid.innerHTML = spinner();
     const scope = content.querySelector('#n-scope').value;
-    const route = content.querySelector('#n-route').value;
+    const routes = [...content.querySelectorAll('#n-route-list input:checked')].map((o) => o.value).filter(Boolean);
     const params = new URLSearchParams({ scope });
-    if (scope === 'route') { if (!route) { grid.innerHTML = '<div class="empty">Select a route and click Load.</div>'; return; } params.set('route', route); }
+    if (scope === 'route') {
+      if (!routes.length) {
+        grid.innerHTML = '<div class="empty">Select one or more routes and click Load.</div>';
+        content.querySelector('#n-status').innerHTML = '';
+        updateNotifBtn(content);
+        return;
+      }
+      params.set('routes', routes.join(','));
+    }
     const res = await API.get(`/notifications/preview?${params}`);
+    const scopeNote = scope === 'route' ? `<div class="alert info">Selected route(s): <b>${routes.map(esc).join(', ')}</b></div>` : '';
     content.querySelector('#n-status').innerHTML = res.enabled
-      ? '<div class="alert info">WhatsApp is LIVE (SmartPing).</div>'
-      : '<div class="alert warn">WhatsApp is in <b>SIMULATION</b> mode (messages are logged as Sent but not actually delivered). Configure SmartPing in <code>.env</code> to go live.</div>';
+      ? `${scopeNote}<div class="alert info">WhatsApp is LIVE (SmartPing).</div>`
+      : `${scopeNote}<div class="alert warn">WhatsApp is in <b>SIMULATION</b> mode (messages are logged as Sent but not actually delivered). Configure SmartPing in <code>.env</code> to go live.</div>`;
     if (!res.data.length) { grid.innerHTML = '<div class="empty">No students to notify.</div>'; return; }
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th class="checkbox-cell"><input type="checkbox" id="n-all"></th><th>Name</th><th>Mobile</th><th>Route</th><th>Bus</th><th>Tracking</th><th>Ready</th></tr></thead>
@@ -753,7 +801,7 @@
     const status = content.querySelector('#l-status').value;
     const rows = await API.get(`/notifications/log${status ? '?status=' + status : ''}`);
     if (!rows.length) { grid.innerHTML = '<div class="empty">No messages logged yet.</div>'; return; }
-    const incharge = API.isIncharge();
+    const incharge = API.canAccess('notifications');
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th>Student</th><th>Mobile</th><th>Sent Time</th><th>Status</th>${incharge ? '<th>Action</th>' : ''}</tr></thead>
       <tbody>${rows.map((r) => `<tr><td>${esc(r.student_name)}</td><td>${esc(r.mobile || '-')}</td>
@@ -814,12 +862,216 @@
       r.data.map((x) => ({ ...x, sent_time: fmtDateTime(x.sent_time) })));
   }
 
+  // ============================ SETTINGS ============================
+  const settingMeta = {
+    class: { label: 'Class', placeholder: 'e.g. 10' },
+    section: { label: 'Section', placeholder: 'e.g. A' },
+    category: { label: 'Category of Drop', placeholder: 'e.g. Robotics Club' },
+    route: { label: 'Current Route Number', placeholder: 'e.g. R10' },
+  };
+
+  async function settings(c) {
+    c.innerHTML = `
+      <div class="section-head">
+        <div><h2>Settings</h2><div class="sub">Manage student dropdowns, user roles, and access.</div></div>
+      </div>
+      <div class="tabs">
+        ${Object.entries(settingMeta).map(([type, meta], idx) =>
+          `<button class="tab ${idx === 0 ? 'active' : ''}" data-setting="${type}">${Icons.svg('settings', 16)} ${esc(meta.label)}</button>`
+        ).join('')}
+        <button class="tab" data-access="users">${Icons.svg('shield', 16)} Roles & Access</button>
+      </div>
+      <div id="settings-content">${spinner()}</div>`;
+    c.querySelectorAll('[data-setting]').forEach((tab) => tab.addEventListener('click', () => {
+      c.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
+      tab.classList.add('active');
+      loadSettingType(c.querySelector('#settings-content'), tab.dataset.setting);
+    }));
+    c.querySelector('[data-access]').addEventListener('click', (e) => {
+      c.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
+      e.currentTarget.classList.add('active');
+      accessManagement(c.querySelector('#settings-content'));
+    });
+    await loadSettingType(c.querySelector('#settings-content'), 'class');
+  }
+
+  async function loadSettingType(content, type) {
+    const meta = settingMeta[type];
+    content.innerHTML = spinner();
+    const all = await API.get('/settings/student-options?all=true');
+    const rows = all[type] || [];
+    content.innerHTML = `
+      <div class="card">
+        <div class="section-head">
+          <h2>${esc(meta.label)} Options</h2>
+          <div class="toolbar">
+            <input id="setting-value" placeholder="${esc(meta.placeholder)}" maxlength="150">
+            <button class="btn" id="setting-add">${Icons.svg('plus', 16)} Add</button>
+          </div>
+        </div>
+        <div id="setting-grid">${settingTable(rows)}</div>
+      </div>`;
+    content.querySelector('#setting-add').addEventListener('click', () => addSettingOption(content, type));
+    content.querySelector('#setting-value').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') addSettingOption(content, type);
+    });
+    bindSettingActions(content, type);
+  }
+
+  function settingTable(rows) {
+    if (!rows.length) return '<div class="empty">No options added yet.</div>';
+    return `<div class="table-wrap"><table>
+      <thead><tr><th>Option</th><th>Sort</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr>
+        <td>${esc(r.value)}</td>
+        <td>${esc(r.sort_order)}</td>
+        <td>${badge(r.status, r.status === 'Active' ? 'green' : 'gray')}</td>
+        <td><div class="row-actions">
+          <button class="icon-btn" data-edit-setting="${r.id}" data-value="${esc(r.value)}" data-sort="${esc(r.sort_order)}" data-status="${esc(r.status)}" title="Edit">${Icons.svg('edit', 15)}</button>
+          <button class="icon-btn" data-toggle-setting="${r.id}" data-status="${esc(r.status)}" title="${r.status === 'Active' ? 'Deactivate' : 'Activate'}">${Icons.svg('refresh', 15)}</button>
+          <button class="icon-btn danger" data-delete-setting="${r.id}" data-value="${esc(r.value)}" title="Delete">${Icons.svg('trash', 15)}</button>
+        </div></td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  }
+
+  async function addSettingOption(content, type) {
+    const input = content.querySelector('#setting-value');
+    const value = input.value.trim();
+    if (!value) { input.focus(); toast('Enter an option value.', 'warning'); return; }
+    try {
+      await API.post('/settings/student-options', { type, value });
+      toast('Option added.', 'success');
+      await loadSettingType(content, type);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function bindSettingActions(content, type) {
+    content.querySelectorAll('[data-edit-setting]').forEach((b) => b.addEventListener('click', () => editSettingOption(content, type, b)));
+    content.querySelectorAll('[data-toggle-setting]').forEach((b) => b.addEventListener('click', async () => {
+      const status = b.dataset.status === 'Active' ? 'Inactive' : 'Active';
+      try {
+        await API.put(`/settings/student-options/${b.dataset.toggleSetting}`, { status });
+        toast(`Option ${status === 'Active' ? 'activated' : 'deactivated'}.`, 'success');
+        await loadSettingType(content, type);
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+    content.querySelectorAll('[data-delete-setting]').forEach((b) => b.addEventListener('click', async () => {
+      if (!(await confirm({ title: 'Delete Option', message: `Delete "${b.dataset.value}"?`, confirmText: 'Delete', danger: true }))) return;
+      try {
+        await API.del(`/settings/student-options/${b.dataset.deleteSetting}`);
+        toast('Option deleted.', 'success');
+        await loadSettingType(content, type);
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  function editSettingOption(content, type, button) {
+    modal({
+      title: 'Edit Option',
+      body: `<form id="setting-form">
+        ${field('Option', `<input name="value" value="${esc(button.dataset.value)}" maxlength="150" required>`, true)}
+        ${field('Sort Order', `<input name="sort_order" type="number" min="0" step="1" value="${esc(button.dataset.sort || 0)}" required>`, true)}
+        ${field('Status', `<select name="status">${options(['Active', 'Inactive'], button.dataset.status)}</select>`, true)}
+      </form>`,
+      footer: `<button class="btn secondary" data-close>Cancel</button><button class="btn" id="save-setting">Save</button>`,
+      onMount: (el, close) => {
+        el.querySelector('#save-setting').addEventListener('click', async () => {
+          const form = el.querySelector('#setting-form');
+          if (!form.reportValidity()) return;
+          const data = Object.fromEntries([...new FormData(form).entries()].map(([k, v]) => [k, String(v).trim()]));
+          try {
+            await API.put(`/settings/student-options/${button.dataset.editSetting}`, data);
+            toast('Option updated.', 'success');
+            close();
+            await loadSettingType(content, type);
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      },
+    });
+  }
+
   // ============================ USERS ============================
-  async function users(c) {
-    c.innerHTML = `<div class="section-head"><h2>Users</h2><button class="btn" id="btn-add-user">${Icons.svg('plus', 16)} Add User</button></div>
-      <div id="user-grid">${spinner()}</div>`;
+  async function accessManagement(c) {
+    c.innerHTML = `<div class="card"><div class="section-head">
+        <div><h2>Roles</h2><div class="sub">Create roles and choose which pages each role can open.</div></div>
+        <button class="btn" id="btn-add-role">${Icons.svg('plus', 16)} Add Role</button>
+      </div>
+      <div id="role-grid">${spinner()}</div></div>
+      <div class="card"><div class="section-head">
+        <div><h2>Roles & Access Management</h2><div class="sub">Create users and control app access by role.</div></div>
+        <button class="btn" id="btn-add-user">${Icons.svg('plus', 16)} Add User</button>
+      </div>
+      <div id="user-grid">${spinner()}</div></div>`;
+    c.querySelector('#btn-add-role').addEventListener('click', () => roleForm(c));
     c.querySelector('#btn-add-user').addEventListener('click', () => userForm(c));
+    await loadRoles(c);
     await loadUsers(c);
+  }
+  async function loadRoles(c) {
+    const grid = c.querySelector('#role-grid');
+    const [roles, pages] = await Promise.all([API.get('/settings/roles'), API.get('/settings/pages')]);
+    if (!roles.length) { grid.innerHTML = '<div class="empty">No roles configured.</div>'; return; }
+    const pageLabel = Object.fromEntries(pages.map((p) => [p.key, p.label]));
+    grid.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>Role</th><th>Page Access</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${roles.map((r) => `<tr>
+        <td><b>${esc(r.role_name)}</b><br><span class="muted">${esc(r.role_key)}${r.is_system ? ' - system' : ''}</span></td>
+        <td>${r.permissions.length ? r.permissions.map((p) => badge(pageLabel[p] || p, 'blue')).join(' ') : '<span class="muted">No pages</span>'}</td>
+        <td>${statusBadge(r.status)}</td>
+        <td><div class="row-actions">
+          <button class="icon-btn" data-edit-role='${esc(JSON.stringify(r))}' title="Edit">${Icons.svg('edit', 15)}</button>
+          ${r.is_system ? '' : `<button class="icon-btn danger" data-del-role="${esc(r.role_key)}" data-name="${esc(r.role_name)}" title="Delete">${Icons.svg('trash', 15)}</button>`}
+        </div></td>
+      </tr>`).join('')}</tbody></table></div>`;
+    grid.querySelectorAll('[data-edit-role]').forEach((b) => b.addEventListener('click', () => roleForm(c, JSON.parse(b.dataset.editRole))));
+    grid.querySelectorAll('[data-del-role]').forEach((b) => b.addEventListener('click', async () => {
+      if (!(await confirm({ title: 'Delete Role', message: `Delete role "${b.dataset.name}"?`, confirmText: 'Delete', danger: true }))) return;
+      try { await API.del(`/settings/roles/${b.dataset.delRole}`); toast('Role deleted.', 'success'); await loadRoles(c); }
+      catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  async function roleForm(c, role) {
+    const editing = !!role;
+    const [pages] = await Promise.all([API.get('/settings/pages')]);
+    const current = new Set(role ? role.permissions : []);
+    modal({
+      title: editing ? 'Edit Role' : 'Add Role',
+      size: 'lg',
+      body: `<form id="role-form">
+        ${field('Role Name', `<input name="role_name" value="${esc(role ? role.role_name : '')}" maxlength="150" required>`, true)}
+        ${editing ? field('Status', `<select name="status">${options(['Active', 'Inactive'], role.status)}</select>`, true) : ''}
+        <div class="field"><label>Page Access <span class="req">*</span></label>
+          <div class="quick-actions" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+            ${pages.map((p) => `<label class="quick-action" style="align-items:flex-start;text-align:left;gap:8px">
+              <span><input type="checkbox" name="permissions" value="${esc(p.key)}" ${current.has(p.key) ? 'checked' : ''}> ${esc(p.label)}</span>
+            </label>`).join('')}
+          </div>
+        </div>
+      </form>`,
+      footer: `<button class="btn secondary" data-close>Cancel</button><button class="btn" id="save-role">${editing ? 'Update' : 'Save'}</button>`,
+      onMount: (el, close) => {
+        el.querySelector('#save-role').addEventListener('click', async () => {
+          const form = el.querySelector('#role-form');
+          if (!form.reportValidity()) return;
+          const fd = new FormData(form);
+          const data = {
+            role_name: String(fd.get('role_name') || '').trim(),
+            status: String(fd.get('status') || (role ? role.status : 'Active')).trim(),
+            permissions: fd.getAll('permissions'),
+          };
+          if (!data.permissions.length) { toast('Select at least one page.', 'warning'); return; }
+          try {
+            if (editing) await API.put(`/settings/roles/${role.role_key}`, data);
+            else await API.post('/settings/roles', data);
+            toast(`Role ${editing ? 'updated' : 'added'}.`, 'success');
+            close();
+            await loadRoles(c);
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      },
+    });
   }
   async function loadUsers(c) {
     const grid = c.querySelector('#user-grid');
@@ -828,7 +1080,7 @@
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>${list.map((u) => `<tr><td>${esc(u.full_name)}</td><td>${esc(u.username)}</td>
-        <td>${badge(u.role === 'transport_incharge' ? 'Transport Incharge' : 'Data Entry', u.role === 'transport_incharge' ? 'blue' : 'gray')}</td>
+        <td>${badge(u.role_name || u.role, u.role === 'transport_incharge' ? 'blue' : 'gray')}</td>
         <td>${statusBadge(u.status)}</td>
         <td><div class="row-actions"><button class="icon-btn" data-edit='${esc(JSON.stringify(u))}' title="Edit">${Icons.svg('edit', 15)}</button>
         ${u.id !== me.id ? `<button class="icon-btn danger" data-del="${u.id}" data-name="${esc(u.full_name)}" title="Delete">${Icons.svg('trash', 15)}</button>` : '<span class="muted">(you)</span>'}</div></td></tr>`).join('')}
@@ -840,15 +1092,19 @@
       catch (e) { toast(e.message, 'error'); }
     }));
   }
-  function userForm(c, user) {
+  async function userForm(c, user) {
     const editing = !!user; const u = user || {};
+    let roles;
+    try { roles = await API.get('/settings/roles'); }
+    catch (e) { toast(e.message, 'error'); return; }
+    const activeRoles = roles.filter((r) => r.status === 'Active' || r.role_key === u.role);
     modal({
       title: editing ? 'Edit User' : 'Add User',
       body: `<form id="user-form">
         ${field('Full Name', `<input name="full_name" value="${esc(u.full_name || '')}" required>`, true)}
         ${editing ? '' : field('Username', `<input name="username" required>`, true)}
         ${field(editing ? 'New Password (leave blank to keep)' : 'Password', `<input type="password" name="password" ${editing ? '' : 'required'}>`, !editing)}
-        ${field('Role', `<select name="role"><option value="transport_incharge" ${u.role === 'transport_incharge' ? 'selected' : ''}>Transport Incharge</option><option value="data_entry" ${u.role === 'data_entry' ? 'selected' : ''}>Data Entry User</option></select>`, true)}
+        ${field('Role', `<select name="role" required>${activeRoles.map((r) => `<option value="${esc(r.role_key)}" ${u.role === r.role_key ? 'selected' : ''}>${esc(r.role_name)}</option>`).join('')}</select>`, true)}
         ${field('Status', `<select name="status">${options(['Active', 'Inactive'], u.status || 'Active')}</select>`)}
       </form>`,
       footer: `<button class="btn secondary" data-close>Cancel</button><button class="btn" id="save-user">${editing ? 'Update' : 'Save'}</button>`,
@@ -887,6 +1143,6 @@
 
   window.Pages = {
     dashboard, students, trips, buses, routeAssignment, routeReplacement,
-    notifications, reports, users, account,
+    notifications, reports, settings, account,
   };
 })();

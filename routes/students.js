@@ -3,7 +3,7 @@
 const express = require('express');
 const multer = require('multer');
 const db = require('../db/database');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requirePageAccess } = require('../middleware/auth');
 const { parseUpload } = require('../services/excel');
 
 const router = express.Router();
@@ -12,8 +12,72 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 const CATEGORIES = [
   'Stay Back Study Hours', 'Sports', 'IIT/JEE Coaching', 'Cultural Activities', 'Other',
 ];
+const STATUSES = ['Active', 'Inactive'];
+
+function clean(value) {
+  return String(value == null ? '' : value).trim().replace(/\s+/g, ' ');
+}
+
+function normalizeMobile(value) {
+  let n = clean(value).replace(/\D/g, '');
+  if (n.length === 11 && n.startsWith('0')) n = n.slice(1);
+  if (n.length === 12 && n.startsWith('91')) n = n.slice(2);
+  return n;
+}
+
+function validateCode(value, label, { required = false, max = 50 } = {}) {
+  const v = clean(value);
+  if (!v) return required ? `${label} is required.` : '';
+  if (v.length > max) return `${label} must be ${max} characters or fewer.`;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_/-]*$/.test(v)) {
+    return `${label} can use only letters, numbers, slash, hyphen, and underscore.`;
+  }
+  return '';
+}
+
+function validatePersonName(value, label, { required = false } = {}) {
+  const v = clean(value);
+  if (!v) return required ? `${label} is required.` : '';
+  if (v.length < 2) return `${label} must be at least 2 characters.`;
+  if (v.length > 150) return `${label} must be 150 characters or fewer.`;
+  if (!/[A-Za-z]/.test(v) || /[0-9]/.test(v) || !/^[A-Za-z .'-]+$/.test(v)) {
+    return `${label} can use only letters, spaces, dot, apostrophe, and hyphen.`;
+  }
+  return '';
+}
+
+function validateClassSection(value, label, { required = false } = {}) {
+  const v = clean(value);
+  if (!v) return required ? `${label} is required.` : '';
+  if (v.length > 30) return `${label} must be 30 characters or fewer.`;
+  if (!/^[A-Za-z0-9 /-]+$/.test(v)) {
+    return `${label} can use only letters, numbers, spaces, slash, and hyphen.`;
+  }
+  return '';
+}
+
+function validateSettingValue(value, label, { required = false, max = 150 } = {}) {
+  const v = clean(value);
+  if (!v) return required ? `${label} is required.` : '';
+  if (v.length > max) return `${label} must be ${max} characters or fewer.`;
+  if (!/^[A-Za-z0-9 .\/_'&()-]+$/.test(v)) {
+    return `${label} can use only letters, numbers, spaces, dot, slash, underscore, apostrophe, ampersand, parentheses, and hyphen.`;
+  }
+  return '';
+}
+
+function validateMobile(value, { required = false } = {}) {
+  const raw = clean(value);
+  if (!raw) return required ? 'Parent Mobile Number is required.' : '';
+  const n = normalizeMobile(raw);
+  if (!/^[6-9]\d{9}$/.test(n)) {
+    return 'Parent Mobile Number must be a valid 10-digit Indian mobile number.';
+  }
+  return '';
+}
 
 router.use(authenticate);
+router.use(requirePageAccess('students'));
 
 // Helper: attach assigned bus (bus on the student's route)
 const SELECT_WITH_BUS = `
@@ -78,7 +142,12 @@ router.get('/filters', async (req, res, next) => {
     const classes = (await db.prepare(`SELECT DISTINCT class FROM students WHERE class <> '' ORDER BY class`).all()).map(r => r.class);
     const sections = (await db.prepare(`SELECT DISTINCT section FROM students WHERE section <> '' ORDER BY section`).all()).map(r => r.section);
     const routes = (await db.prepare(`SELECT DISTINCT route_number FROM students WHERE route_number IS NOT NULL AND route_number <> '' ORDER BY route_number`).all()).map(r => r.route_number);
-    res.json({ classes, sections, routes, categories: CATEGORIES });
+    const configuredCategories = (await db.prepare(`
+      SELECT value FROM student_settings
+      WHERE type = 'category' AND status = 'Active'
+      ORDER BY sort_order, value
+    `).all()).map(r => r.value);
+    res.json({ classes, sections, routes, categories: configuredCategories.length ? configuredCategories : CATEGORIES });
   } catch (err) { next(err); }
 });
 
@@ -97,31 +166,58 @@ function validateStudent(body, { partial = false } = {}) {
   const req = (k) => !partial || body[k] !== undefined;
 
   if (req('student_code')) {
-    if (!body.student_code || !String(body.student_code).trim()) errors.push('Student ID is required.');
-    else data.student_code = String(body.student_code).trim();
+    const studentCode = clean(body.student_code);
+    const err = validateCode(studentCode, 'Student ID', { required: true });
+    if (err) errors.push(err);
+    else data.student_code = studentCode;
   }
   if (req('name')) {
-    if (!body.name || !String(body.name).trim()) errors.push('Student Name is required.');
-    else data.name = String(body.name).trim();
+    const name = clean(body.name);
+    const err = validatePersonName(name, 'Student Name', { required: true });
+    if (err) errors.push(err);
+    else data.name = name;
   }
-  if (body.class !== undefined) data.class = String(body.class || '').trim();
-  if (body.section !== undefined) data.section = String(body.section || '').trim();
-  if (body.category !== undefined) {
-    const c = String(body.category || '').trim();
-    if (c && !CATEGORIES.includes(c)) errors.push(`Category must be one of: ${CATEGORIES.join(', ')}.`);
-    else data.category = c || null;
+  if (req('class')) {
+    const cls = clean(body.class);
+    const err = validateClassSection(cls, 'Class', { required: true });
+    if (err) errors.push(err);
+    else data.class = cls;
   }
-  if (body.parent_name !== undefined) data.parent_name = String(body.parent_name || '').trim();
-  if (body.parent_mobile !== undefined) {
-    const m = String(body.parent_mobile || '').trim();
-    if (m && !/^\+?[0-9]{7,15}$/.test(m.replace(/[\s-]/g, ''))) errors.push('Parent Mobile must be a valid number.');
-    else data.parent_mobile = m;
+  if (req('section')) {
+    const section = clean(body.section);
+    const err = validateClassSection(section, 'Section', { required: true });
+    if (err) errors.push(err);
+    else data.section = section;
   }
-  if (body.route_number !== undefined) data.route_number = String(body.route_number || '').trim() || null;
-  if (body.status !== undefined) {
-    const s = String(body.status || '').trim();
-    if (s && !['Active', 'Inactive'].includes(s)) errors.push('Status must be Active or Inactive.');
-    else data.status = s || 'Active';
+  if (req('category')) {
+    const c = clean(body.category);
+    const err = validateSettingValue(c, 'Category of Drop', { required: true });
+    if (err) errors.push(err);
+    else data.category = c;
+  }
+  if (req('parent_name')) {
+    const parentName = clean(body.parent_name);
+    const err = validatePersonName(parentName, 'Parent Name', { required: true });
+    if (err) errors.push(err);
+    else data.parent_name = parentName;
+  }
+  if (req('parent_mobile')) {
+    const mobile = clean(body.parent_mobile);
+    const err = validateMobile(mobile, { required: true });
+    if (err) errors.push(err);
+    else data.parent_mobile = normalizeMobile(mobile);
+  }
+  if (body.route_number !== undefined) {
+    const route = clean(body.route_number);
+    const err = validateCode(route, 'Current Route Number');
+    if (err) errors.push(err);
+    else data.route_number = route || null;
+  }
+  if (req('status')) {
+    const s = clean(body.status);
+    if (!s) errors.push('Status is required.');
+    else if (!STATUSES.includes(s)) errors.push('Status must be Active or Inactive.');
+    else data.status = s;
   }
   return { errors, data };
 }
@@ -265,19 +361,23 @@ function buildBulkPreview(rows) {
       parent_mobile: String(pick(row, ['parentmobile', 'parentmobilenumber', 'mobile']) || '').trim(),
     };
     const rowErrors = [];
-    if (!data.student_code) rowErrors.push('Missing Student ID');
-    if (!data.name) rowErrors.push('Missing Student Name');
-    if (data.category && !CATEGORIES.includes(data.category)) {
-      rowErrors.push(`Invalid Category "${data.category}"`);
-    }
-    if (data.parent_mobile && !/^\+?[0-9]{7,15}$/.test(data.parent_mobile.replace(/[\s-]/g, ''))) {
-      rowErrors.push('Invalid Parent Mobile');
-    }
+    const codeError = validateCode(data.student_code, 'Student ID', { required: true });
+    const nameError = validatePersonName(data.name, 'Student Name', { required: true });
+    const classError = validateClassSection(data.class, 'Class', { required: true });
+    const sectionError = validateClassSection(data.section, 'Section', { required: true });
+    const mobileError = validateMobile(data.parent_mobile, { required: true });
+    if (codeError) rowErrors.push(codeError);
+    if (nameError) rowErrors.push(nameError);
+    if (classError) rowErrors.push(classError);
+    if (sectionError) rowErrors.push(sectionError);
+    const categoryError = validateSettingValue(data.category, 'Category of Drop', { required: true });
+    if (categoryError) rowErrors.push(categoryError);
+    if (mobileError) rowErrors.push(mobileError);
     if (data.student_code) {
       if (seenCodes.has(data.student_code)) rowErrors.push('Duplicate Student ID in file');
       seenCodes.add(data.student_code);
     }
-    if (!data.category) data.category = null;
+    if (!rowErrors.length) data.parent_mobile = normalizeMobile(data.parent_mobile);
 
     if (rowErrors.length) {
       errors.push({ row: rowNo, student_code: data.student_code, name: data.name, messages: rowErrors });

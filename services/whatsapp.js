@@ -1,29 +1,10 @@
 'use strict';
 
+const http = require('http');
+const https = require('https');
+
 /**
- * WhatsApp notification service — SmartPing BSP via api-wa.co campaign API.
- *
- * Endpoint (from the provided CURL):
- *   POST https://backend.api-wa.co/campaign/smartpingbsp/api/v2
- *   {
- *     "apiKey": "...", "campaignName": "staybacktransport",
- *     "destination": "<mobile>", "userName": "Digital Caampus",
- *     "templateParams": [ ... ], "source": "...",
- *     "media": {}, "buttons": [], "carouselCards": [], "location": {},
- *     "attributes": {}, "paramsFallbackValue": { "FirstName": "user" }
- *   }
- *
- * `templateParams` fills the variables of the approved WhatsApp template that is
- * attached to the "staybacktransport" campaign, IN ORDER. The approved template is:
- *
- *     Dear Parent,
- *     Your ward {{1}} has been assigned to Bus {{2}} for today's stay-back transport.
- *     Live Tracking: {{3}}
- *     Contact No: {{4}}
- *     Thank you.
- *
- * So this app sends:  [ student_name, bus_number, tracking_link, contact_no ]
- * If your approved template changes, adjust TEMPLATE_PARAMS below to match it.
+ * WhatsApp notification service: SmartPing BSP via api-wa.co campaign API.
  *
  * Configure in .env:
  *   WHATSAPP_ENABLED=true
@@ -31,10 +12,10 @@
  *   SMARTPING_CAMPAIGN_NAME=staybacktransport
  *   SMARTPING_USERNAME=Digital Caampus
  *   SMARTPING_API_URL=https://backend.api-wa.co/campaign/smartpingbsp/api/v2
- *   SMARTPING_COUNTRY_CODE=91        (optional: prefixed to 10-digit numbers)
+ *   SMARTPING_COUNTRY_CODE=91
  *
- * While WHATSAPP_ENABLED is not "true" (or no API key is set), it runs in
- * SIMULATION mode: messages are logged as "Sent" but nothing is actually sent.
+ * The approved campaign template's variables are sent in this order:
+ *   [student_name, bus_number, tracking_link, contact_no]
  */
 
 const DEFAULT_TEMPLATE =
@@ -45,6 +26,8 @@ const DEFAULT_TEMPLATE =
   'Thank you.';
 
 const DEFAULT_ENDPOINT = 'https://backend.api-wa.co/campaign/smartpingbsp/api/v2';
+const TEMPLATE_PARAM_KEYS = ['student_name', 'bus_number', 'tracking_link', 'contact_no'];
+const REQUEST_TIMEOUT_MS = Math.max(parseInt(process.env.SMARTPING_TIMEOUT_MS, 10) || 15000, 1000);
 
 function renderTemplate(template, vars) {
   return String(template || DEFAULT_TEMPLATE).replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) =>
@@ -55,34 +38,162 @@ function renderTemplate(template, vars) {
 function apiKey() {
   return process.env.SMARTPING_API_KEY || process.env.SMARTPING_AUTH_TOKEN || '';
 }
+
 function endpoint() {
   return process.env.SMARTPING_API_URL || DEFAULT_ENDPOINT;
 }
+
 function isEnabled() {
-  return String(process.env.WHATSAPP_ENABLED).toLowerCase() === 'true' && !!apiKey();
+  return String(process.env.WHATSAPP_ENABLED || '').trim().toLowerCase() === 'true' && !!apiKey();
 }
 
-// Normalize a phone number: keep digits, optionally prefix a country code.
 function formatNumber(mobile) {
   let n = String(mobile || '').replace(/\D/g, '');
-  const cc = (process.env.SMARTPING_COUNTRY_CODE || '').replace(/\D/g, '');
-  if (cc && n.length === 10) n = cc + n; // bare 10-digit local number -> add country code
+  if (n.startsWith('00')) n = n.slice(2);
+  if (n.length === 11 && n.startsWith('0')) n = n.slice(1);
+
+  const cc = String(process.env.SMARTPING_COUNTRY_CODE || '').replace(/\D/g, '');
+  if (cc) {
+    if (n.length === 10) n = cc + n;
+    if (n.length === cc.length + 11 && n.startsWith(`${cc}0`)) n = cc + n.slice(cc.length + 1);
+  }
+
   return n;
 }
 
-/**
- * @param {{mobile, studentName, busNumber, trackingLink, template?}} opts
- * @returns {Promise<{status:'Sent'|'Failed', message:string, response:string}>}
- */
+function isValidDestination(destination) {
+  return /^\d{10,15}$/.test(destination);
+}
+
+function responseSummary(statusCode, text) {
+  return `HTTP ${statusCode}: ${String(text || '').slice(0, 1000)}`;
+}
+
+function parseProviderResponse(statusCode, text) {
+  const body = String(text || '');
+  const result = { ok: statusCode >= 200 && statusCode < 300, data: null };
+
+  try {
+    result.data = JSON.parse(body);
+  } catch (_) {
+    return result;
+  }
+
+  const data = result.data || {};
+  const values = collectProviderValues(data);
+
+  if (data.success === false || data.ok === false) result.ok = false;
+  if (values.some((v) => ['error', 'failed', 'failure', 'fail', 'false', 'rejected', 'unauthorized', 'invalid'].includes(v))) {
+    result.ok = false;
+  }
+  if (values.some((v) => /(invalid|missing|required|denied|unauthori[sz]ed|reject|fail|error|not\s+found)/.test(v))) {
+    result.ok = false;
+  }
+  if (Number(data.statusCode) >= 400 || Number(data.code) >= 400) result.ok = false;
+
+  return result;
+}
+
+function collectProviderValues(value, depth = 0) {
+  if (value === undefined || value === null || depth > 4) return [];
+  if (typeof value !== 'object') return [String(value).toLowerCase()];
+  if (Array.isArray(value)) return value.flatMap((item) => collectProviderValues(item, depth + 1));
+
+  const interestingKeys = new Set([
+    'success',
+    'ok',
+    'status',
+    'statusCode',
+    'code',
+    'error',
+    'errors',
+    'errorMessage',
+    'message',
+    'reason',
+    'description',
+  ]);
+
+  return Object.entries(value).flatMap(([key, nested]) =>
+    interestingKeys.has(key) || (nested && typeof nested === 'object')
+      ? collectProviderValues(nested, depth + 1)
+      : []
+  );
+}
+
+function templateParams(vars) {
+  return TEMPLATE_PARAM_KEYS.map((key) => vars[key] || '');
+}
+
+async function postJson(url, payload) {
+  if (typeof fetch === 'function') {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      return { statusCode: resp.status, text: await resp.text() };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const u = new URL(url);
+    const client = u.protocol === 'http:' ? http : https;
+
+    const req = client.request({
+      method: 'POST',
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port,
+      path: `${u.pathname}${u.search}`,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+      timeout: REQUEST_TIMEOUT_MS,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => resolve({
+        statusCode: res.statusCode || 0,
+        text: Buffer.concat(chunks).toString('utf8'),
+      }));
+    });
+
+    req.on('timeout', () => req.destroy(new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`)));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
 async function sendOne({ mobile, studentName, busNumber, trackingLink, contactNo, template }) {
   const contact = contactNo || process.env.SMARTPING_CONTACT_NO || '';
+  const destination = formatNumber(mobile);
   const vars = {
     student_name: studentName || '',
     bus_number: busNumber || '',
     tracking_link: trackingLink || '',
     contact_no: contact,
   };
-  const message = renderTemplate(template, vars); // human-readable copy for the log/preview
+  const message = renderTemplate(template, vars);
+
+  if (!mobile) {
+    return { status: 'Failed', message, response: 'No mobile number on record.' };
+  }
+  if (!isValidDestination(destination)) {
+    return {
+      status: 'Failed',
+      message,
+      response: `Invalid WhatsApp destination after formatting: "${destination || '(empty)'}".`,
+    };
+  }
 
   if (!isEnabled()) {
     return {
@@ -91,20 +202,13 @@ async function sendOne({ mobile, studentName, busNumber, trackingLink, contactNo
       response: 'SIMULATED (WhatsApp disabled). Set WHATSAPP_ENABLED=true and SMARTPING_API_KEY to send for real.',
     };
   }
-  if (!mobile) {
-    return { status: 'Failed', message, response: 'No mobile number on record.' };
-  }
-
-  // The approved campaign template's variables, in order:
-  // {{1}} name, {{2}} bus, {{3}} tracking link, {{4}} contact number.
-  const TEMPLATE_PARAMS = [studentName || '', busNumber || '', trackingLink || '', contact || ''];
 
   const payload = {
     apiKey: apiKey(),
     campaignName: process.env.SMARTPING_CAMPAIGN_NAME || 'staybacktransport',
-    destination: formatNumber(mobile),
+    destination,
     userName: process.env.SMARTPING_USERNAME || 'Digital Caampus',
-    templateParams: TEMPLATE_PARAMS,
+    templateParams: templateParams(vars),
     source: process.env.SMARTPING_SOURCE || 'stay-back-route-management',
     media: {},
     buttons: [],
@@ -115,28 +219,30 @@ async function sendOne({ mobile, studentName, busNumber, trackingLink, contactNo
   };
 
   try {
-    const resp = await fetch(endpoint(), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const text = await resp.text();
-
-    let ok = resp.ok;
-    try {
-      const j = JSON.parse(text);
-      // api-wa.co returns 200 with a success flag / message; treat explicit failures as Failed.
-      if (j && (j.success === false || j.status === 'error' || j.error || j.errorMessage)) ok = false;
-    } catch (_) { /* non-JSON body — rely on HTTP status */ }
+    const resp = await postJson(endpoint(), payload);
+    const provider = parseProviderResponse(resp.statusCode, resp.text);
 
     return {
-      status: ok ? 'Sent' : 'Failed',
+      status: provider.ok ? 'Sent' : 'Failed',
       message,
-      response: `HTTP ${resp.status}: ${text.slice(0, 1000)}`,
+      response: responseSummary(resp.statusCode, resp.text),
     };
   } catch (err) {
-    return { status: 'Failed', message, response: err.message };
+    const reason = err && err.name === 'AbortError'
+      ? `Request timed out after ${REQUEST_TIMEOUT_MS}ms`
+      : err.message;
+
+    return { status: 'Failed', message, response: reason };
   }
 }
 
-module.exports = { sendOne, renderTemplate, isEnabled, DEFAULT_TEMPLATE };
+module.exports = {
+  sendOne,
+  renderTemplate,
+  isEnabled,
+  formatNumber,
+  isValidDestination,
+  parseProviderResponse,
+  DEFAULT_TEMPLATE,
+  TEMPLATE_PARAM_KEYS,
+};

@@ -2,10 +2,11 @@
 
 const express = require('express');
 const db = require('../db/database');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requirePageAccess } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(authenticate);
+router.use(requirePageAccess('trips'));
 
 function today() {
   return new Date().toISOString().slice(0, 10);

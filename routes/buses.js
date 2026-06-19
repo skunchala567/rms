@@ -2,10 +2,11 @@
 
 const express = require('express');
 const db = require('../db/database');
-const { authenticate, transportInchargeOnly } = require('../middleware/auth');
+const { authenticate, requirePageAccess } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(authenticate);
+router.use(requirePageAccess('buses'));
 
 // Bus rows with occupancy (active students on the same route)
 const SELECT_WITH_OCCUPANCY = `
@@ -73,7 +74,7 @@ function validateBus(body, { partial = false } = {}) {
 }
 
 // POST /api/buses  (transport incharge only)
-router.post('/', transportInchargeOnly, async (req, res, next) => {
+router.post('/', requirePageAccess('buses'), async (req, res, next) => {
   try {
     const { errors, data } = validateBus(req.body);
     if (errors.length) return res.status(400).json({ error: errors.join(' '), errors });
@@ -95,7 +96,7 @@ router.post('/', transportInchargeOnly, async (req, res, next) => {
 });
 
 // PUT /api/buses/:id  (transport incharge only)
-router.put('/:id', transportInchargeOnly, async (req, res, next) => {
+router.put('/:id', requirePageAccess('buses'), async (req, res, next) => {
   try {
     const bus = await db.prepare('SELECT * FROM buses WHERE id = ?').get(req.params.id);
     if (!bus) return res.status(404).json({ error: 'Bus not found.' });
@@ -122,7 +123,7 @@ router.put('/:id', transportInchargeOnly, async (req, res, next) => {
 });
 
 // DELETE /api/buses/:id  (transport incharge only)
-router.delete('/:id', transportInchargeOnly, async (req, res, next) => {
+router.delete('/:id', requirePageAccess('buses'), async (req, res, next) => {
   try {
     const info = await db.prepare('DELETE FROM buses WHERE id = ?').run(req.params.id);
     if (info.changes === 0) return res.status(404).json({ error: 'Bus not found.' });

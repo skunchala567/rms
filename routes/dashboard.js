@@ -2,10 +2,11 @@
 
 const express = require('express');
 const db = require('../db/database');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requirePageAccess } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(authenticate);
+router.use(requirePageAccess('dashboard'));
 
 // GET /api/dashboard/summary
 router.get('/summary', async (req, res, next) => {

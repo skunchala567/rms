@@ -10,10 +10,29 @@ CREATE TABLE IF NOT EXISTS users (
   username      VARCHAR(100) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   full_name     VARCHAR(150) NOT NULL,
-  role          ENUM('transport_incharge', 'data_entry') NOT NULL,
+  role          VARCHAR(80) NOT NULL,
   status        ENUM('Active', 'Inactive') NOT NULL DEFAULT 'Active',
   created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS roles (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  role_key    VARCHAR(80) NOT NULL UNIQUE,
+  role_name   VARCHAR(150) NOT NULL,
+  is_system   TINYINT(1) NOT NULL DEFAULT 0,
+  status      ENUM('Active', 'Inactive') NOT NULL DEFAULT 'Active',
+  created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  role_key    VARCHAR(80) NOT NULL,
+  page_key    VARCHAR(80) NOT NULL,
+  created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_role_page (role_key, page_key),
+  CONSTRAINT fk_role_perm_role FOREIGN KEY (role_key) REFERENCES roles(role_key) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------------------------------------------------------------------
@@ -105,4 +124,19 @@ CREATE TABLE IF NOT EXISTS notification_log (
   INDEX idx_notif_status (status),
   CONSTRAINT fk_notif_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL,
   CONSTRAINT fk_notif_user FOREIGN KEY (sent_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------
+-- Student dropdown settings
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS student_settings (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  type       ENUM('class', 'section', 'category', 'route') NOT NULL,
+  value      VARCHAR(150) NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  status     ENUM('Active', 'Inactive') NOT NULL DEFAULT 'Active',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_student_setting (type, value),
+  INDEX idx_student_settings_type_status (type, status, sort_order)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

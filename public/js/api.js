@@ -20,6 +20,10 @@
     const u = getUser();
     return u && u.role === 'transport_incharge';
   }
+  function canAccess(page) {
+    const u = getUser();
+    return !!(u && (u.role === 'transport_incharge' || (Array.isArray(u.access) && u.access.includes(page))));
+  }
 
   async function request(method, path, body, opts = {}) {
     const headers = {};
@@ -71,6 +75,7 @@
 
   window.API = {
     getToken, getUser, setSession, clearSession, isIncharge, download,
+    canAccess,
     get: (p) => request('GET', p),
     post: (p, b) => request('POST', p, b),
     put: (p, b) => request('PUT', p, b),

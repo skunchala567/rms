@@ -2,7 +2,7 @@
 
 const express = require('express');
 const db = require('../db/database');
-const { authenticate, transportInchargeOnly } = require('../middleware/auth');
+const { authenticate, requirePageAccess } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(authenticate);
@@ -75,7 +75,7 @@ async function routeOccupied(route, excludeIds = []) {
 }
 
 // POST /api/routes/assign  -> assign selected students to a route (transport incharge only)
-router.post('/assign', transportInchargeOnly, async (req, res, next) => {
+router.post('/assign', requirePageAccess('route-assignment'), async (req, res, next) => {
   try {
     const studentIds = Array.isArray(req.body.studentIds) ? req.body.studentIds : [];
     const route = String(req.body.route || '').trim();
@@ -118,7 +118,7 @@ router.post('/assign', transportInchargeOnly, async (req, res, next) => {
 });
 
 // GET /api/routes/replace/preview?old=R10  -> affected student count
-router.get('/replace/preview', transportInchargeOnly, async (req, res, next) => {
+router.get('/replace/preview', requirePageAccess('route-replacement'), async (req, res, next) => {
   try {
     const oldRoute = String(req.query.old || '').trim();
     if (!oldRoute) return res.status(400).json({ error: 'Old route is required.' });
@@ -135,7 +135,7 @@ router.get('/replace/preview', transportInchargeOnly, async (req, res, next) => 
 });
 
 // POST /api/routes/replace  -> replace old route with new route for all linked students
-router.post('/replace', transportInchargeOnly, async (req, res, next) => {
+router.post('/replace', requirePageAccess('route-replacement'), async (req, res, next) => {
   try {
     const oldRoute = String(req.body.oldRoute || '').trim();
     const newRoute = String(req.body.newRoute || '').trim();
@@ -169,7 +169,7 @@ router.post('/replace', transportInchargeOnly, async (req, res, next) => {
 });
 
 // GET /api/routes/replace/log  -> audit log
-router.get('/replace/log', transportInchargeOnly, async (req, res, next) => {
+router.get('/replace/log', requirePageAccess('route-replacement'), async (req, res, next) => {
   try {
     const rows = await db.prepare(`SELECT * FROM route_replacement_log ORDER BY created_at DESC, id DESC LIMIT 200`).all();
     res.json(rows);
