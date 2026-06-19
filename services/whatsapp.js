@@ -14,10 +14,16 @@
  *   }
  *
  * `templateParams` fills the variables of the approved WhatsApp template that is
- * attached to the "staybacktransport" campaign, IN ORDER. This app sends:
- *     [ student_name, bus_number, tracking_link ]
- * If your approved template has a different number/order of variables, adjust
- * TEMPLATE_PARAMS below to match it.
+ * attached to the "staybacktransport" campaign, IN ORDER. The approved template is:
+ *
+ *     Dear Parent,
+ *     Your ward {{1}} has been assigned to Bus {{2}} for today's stay-back transport.
+ *     Live Tracking: {{3}}
+ *     Contact No: {{4}}
+ *     Thank you.
+ *
+ * So this app sends:  [ student_name, bus_number, tracking_link, contact_no ]
+ * If your approved template changes, adjust TEMPLATE_PARAMS below to match it.
  *
  * Configure in .env:
  *   WHATSAPP_ENABLED=true
@@ -35,6 +41,7 @@ const DEFAULT_TEMPLATE =
   'Dear Parent,\n\n' +
   'Your ward {{student_name}} has been assigned to Bus {{bus_number}} for today\'s stay-back transport.\n\n' +
   'Live Tracking:\n{{tracking_link}}\n\n' +
+  'Contact No: {{contact_no}}\n\n' +
   'Thank you.';
 
 const DEFAULT_ENDPOINT = 'https://backend.api-wa.co/campaign/smartpingbsp/api/v2';
@@ -67,11 +74,13 @@ function formatNumber(mobile) {
  * @param {{mobile, studentName, busNumber, trackingLink, template?}} opts
  * @returns {Promise<{status:'Sent'|'Failed', message:string, response:string}>}
  */
-async function sendOne({ mobile, studentName, busNumber, trackingLink, template }) {
+async function sendOne({ mobile, studentName, busNumber, trackingLink, contactNo, template }) {
+  const contact = contactNo || process.env.SMARTPING_CONTACT_NO || '';
   const vars = {
     student_name: studentName || '',
     bus_number: busNumber || '',
     tracking_link: trackingLink || '',
+    contact_no: contact,
   };
   const message = renderTemplate(template, vars); // human-readable copy for the log/preview
 
@@ -86,8 +95,9 @@ async function sendOne({ mobile, studentName, busNumber, trackingLink, template 
     return { status: 'Failed', message, response: 'No mobile number on record.' };
   }
 
-  // The approved campaign template's variables, in order.
-  const TEMPLATE_PARAMS = [studentName || '', busNumber || '', trackingLink || ''];
+  // The approved campaign template's variables, in order:
+  // {{1}} name, {{2}} bus, {{3}} tracking link, {{4}} contact number.
+  const TEMPLATE_PARAMS = [studentName || '', busNumber || '', trackingLink || '', contact || ''];
 
   const payload = {
     apiKey: apiKey(),

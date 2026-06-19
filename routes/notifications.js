@@ -64,6 +64,7 @@ router.post('/send', transportInchargeOnly, async (req, res, next) => {
         studentName: s.name,
         busNumber: bus ? bus.bus_number : '',
         trackingLink: bus ? bus.gps_link : '',
+        contactNo: bus ? bus.driver_mobile : '',
         template,
       });
       await db.prepare(logSql).run({
@@ -94,6 +95,7 @@ router.post('/resend/:logId', transportInchargeOnly, async (req, res, next) => {
       studentName: log.student_name,
       busNumber: bus ? bus.bus_number : log.bus_number,
       trackingLink: bus ? bus.gps_link : log.tracking_link,
+      contactNo: bus ? bus.driver_mobile : '',
     });
 
     await db.prepare(`

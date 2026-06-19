@@ -139,7 +139,7 @@ Notifications are sent via **SmartPing BSP (api-wa.co campaign API)**, implement
 ```
 POST https://backend.api-wa.co/campaign/smartpingbsp/api/v2
 { "apiKey", "campaignName", "destination", "userName",
-  "templateParams": [ student_name, bus_number, tracking_link ],
+  "templateParams": [ student_name, bus_number, tracking_link, contact_no ],
   "paramsFallbackValue": { "FirstName": "user" }, ... }
 ```
 
@@ -157,13 +157,14 @@ SMARTPING_USERNAME=Digital Caampus
 SMARTPING_COUNTRY_CODE=91     # optional: prefixed to bare 10-digit numbers
 ```
 
-`templateParams` is sent in the order `[student_name, bus_number, tracking_link]`.
-If your approved "staybacktransport" template has a different number or order of
-variables, edit the `TEMPLATE_PARAMS` array in `services/whatsapp.js` to match it.
+`templateParams` is sent in the order `[student_name, bus_number, tracking_link, contact_no]`
+to match the approved template's `{{1}}`–`{{4}}`. `contact_no` is the assigned bus's
+**driver mobile** (or `SMARTPING_CONTACT_NO` if set as a fixed fallback). If your
+approved template changes, edit the `TEMPLATE_PARAMS` array in `services/whatsapp.js`.
 
 ### Message template (preview/log copy)
 The message stored in the delivery log uses these variables: `{{student_name}}`,
-`{{bus_number}}`, `{{tracking_link}}`.
+`{{bus_number}}`, `{{tracking_link}}`, `{{contact_no}}`.
 
 Default message:
 ```
@@ -173,6 +174,8 @@ Your ward {{student_name}} has been assigned to Bus {{bus_number}} for today's s
 
 Live Tracking:
 {{tracking_link}}
+
+Contact No: {{contact_no}}
 
 Thank you.
 ```
