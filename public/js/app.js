@@ -6,7 +6,7 @@
   const NAV = [
     { path: 'dashboard', label: 'Dashboard', icon: 'dashboard', page: 'dashboard' },
     { path: 'students', label: 'Students', icon: 'students', page: 'students' },
-    { path: 'trips', label: '5 PM Trips', icon: 'clock', page: 'trips' },
+    { path: 'trips', label: 'Allocate transport', icon: 'clock', page: 'trips' },
     { path: 'buses', label: 'Buses', icon: 'bus', page: 'buses' },
     { path: 'route-assignment', label: 'Route Assignment', icon: 'route', page: 'routeAssignment' },
     { path: 'route-replacement', label: 'Route Replacement', icon: 'replace', page: 'routeReplacement' },

@@ -19,6 +19,7 @@ router.get('/today', async (req, res, next) => {
     const rows = await db.prepare(`
       SELECT t.id AS trip_id, t.trip_date, t.route_number, t.created_at,
              s.id AS student_id, s.student_code, s.name, s.class, s.section, s.category, s.parent_mobile,
+             s.route_number AS actual_route_number,
              b.bus_number,
              (SELECT bb.bus_number FROM buses bb WHERE bb.route_number = t.route_number AND bb.status='Active' ORDER BY bb.id LIMIT 1) AS route_bus_number
       FROM trip_assignments t

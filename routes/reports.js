@@ -17,9 +17,9 @@ async function busForRoute(route) {
 // ---- Daily Route Report -------------------------------------------------
 async function dailyRouteRows(date) {
   const trips = await db.prepare(`
-    SELECT s.name, s.student_code, s.route_number, s.category, t.bus_id
+    SELECT s.name, s.student_code, t.route_number, s.category, t.bus_id
     FROM trip_assignments t JOIN students s ON s.id = t.student_id
-    WHERE t.trip_date = ? ORDER BY s.route_number, s.name
+    WHERE t.trip_date = ? ORDER BY t.route_number, s.name
   `).all(date);
 
   let source = trips;

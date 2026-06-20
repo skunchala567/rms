@@ -24,6 +24,32 @@
     const listId = `route-list-${Math.random().toString(36).slice(2, 9)}`;
     return `<input name="${esc(name)}" value="${esc(value || '')}" list="${esc(listId)}" placeholder="${esc(placeholder)}" autocomplete="off">${dataList(listId, routes)}`;
   }
+  function downloadCsv(filename, headers, rows) {
+    const csvCell = (value) => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
+    const csv = [headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+  function printHtml(title, html) {
+    const w = window.open('', '_blank');
+    if (!w) { toast('Allow pop-ups to print this report.', 'warning'); return; }
+    w.document.write(`<!doctype html><html><head><title>${esc(title)}</title>
+      <style>
+        @page { size: A4 landscape; margin: 12mm; }
+        body { font-family: Arial, sans-serif; color: #111; }
+        h1 { font-size: 18px; margin: 0 0 12px; }
+        table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        th, td { border: 1px solid #555; padding: 6px; text-align: left; }
+        th { background: #eee; }
+        .badge, .muted { color: #111; }
+      </style></head><body><h1>${esc(title)}</h1>${html}</body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  }
   async function getStudentSettings() {
     return API.get('/settings/student-options');
   }
@@ -38,7 +64,7 @@
       <div class="cards">
         ${statCard('Total Students', s.totalStudents, 'students', '')}
         ${statCard('Awaiting Route Assignment', s.awaitingRoute, 'alert', 'amber')}
-        ${statCard('Assigned for 5 PM Trip', s.assignedFor5pm, 'checkCircle', 'green')}
+        ${statCard('Allocated Transport Today', s.assignedFor5pm, 'checkCircle', 'green')}
         ${statCard('Total Active Buses', s.activeBuses, 'bus', 'teal')}
         ${statCard('WhatsApp Sent Today', s.whatsappToday, 'message', 'purple')}
       </div>
@@ -50,9 +76,11 @@
           ${canSend ? quickAction('buses', 'bus', 'Manage Buses') : ''}
           ${quickAction('route-assignment', 'route', 'Assign Routes')}
           ${canSend ? quickAction('notifications', 'send', 'Send Notifications') : ''}
-          ${quickAction('trips', 'clock', '5 PM Trips')}
+          ${quickAction('trips', 'clock', 'Allocate transport')}
         </div>
-      </div>`;
+      </div>
+      <div class="card"><h2>Route Wise Student Summary</h2><div id="dashboard-route-summary">${spinner()}</div></div>`;
+    await renderRouteStudentSummary(c.querySelector('#dashboard-route-summary'));
   }
   function statCard(label, value, icon, cls) {
     return `<div class="stat-card ${cls}">
@@ -232,13 +260,13 @@
     const editing = !!student;
     const s = student || {};
     let settings;
-    let filters;
-    try { [settings, filters] = await Promise.all([getStudentSettings(), API.get('/students/filters')]); }
+    let availableRoutes;
+    try { [settings, availableRoutes] = await Promise.all([getStudentSettings(), API.get('/routes/list')]); }
     catch (e) { toast(e.message, 'error'); return; }
     const classOptions = optionValues(settings.class);
     const sectionOptions = optionValues(settings.section);
     const categoryOptions = optionValues(settings.category);
-    const routeOptions = uniqueValues([...(filters.routes || []), s.route_number]);
+    const routeOptions = uniqueValues([...(availableRoutes || []), s.route_number]);
     modal({
       title: editing ? 'Edit Student' : 'Add Student',
       size: 'lg',
@@ -251,7 +279,7 @@
           ${field('Category of Drop', `<select name="category" required><option value="">-- Select --</option>${options(categoryOptions, s.category)}</select>`, true)}
           ${field('Parent Name', `<input name="parent_name" value="${esc(s.parent_name || '')}" minlength="2" maxlength="150" pattern="[A-Za-z .'-]*[A-Za-z][A-Za-z .'-]*" title="Use letters, spaces, dot, apostrophe, or hyphen." required>`, true)}
           ${field('Parent Mobile Number', `<input name="parent_mobile" type="tel" inputmode="numeric" value="${esc(s.parent_mobile || '')}" pattern="(?:\\+?91|0)?[6-9][0-9]{9}" title="Enter a valid 10-digit Indian mobile number." required>`, true)}
-          ${field('Current Route Number', routeSearchInput('route_number', s.route_number, routeOptions, 'Awaiting Route Assignment'))}
+          ${field('Current Route Number', `<select name="route_number"><option value="">Awaiting Route Assignment</option>${options(routeOptions, s.route_number)}</select>`)}
           ${field('Status', `<select name="status" required>${options(['Active', 'Inactive'], s.status || 'Active')}</select>`, true)}
         </div>
       </form>`,
@@ -358,14 +386,17 @@
   async function trips(c) {
     tripState.selected.clear();
     c.innerHTML = `
-      <div class="section-head"><h2>5 PM Trip Assignment</h2></div>
+      <div class="section-head"><h2>Allocate transport</h2></div>
       <div class="card">
-        <h2>Today's Trip List <span class="muted" id="trip-date"></span></h2>
+        <div class="section-head">
+          <h2>Today's Trip List <span class="muted" id="trip-date"></span></h2>
+          <button class="btn secondary" id="btn-download-trip">${Icons.svg('download', 16)} Download</button>
+        </div>
         <div id="trip-list">${spinner()}</div>
       </div>
       <div class="card">
         <div class="section-head"><h2>Select Students to Add</h2>
-          <button class="btn" id="btn-assign-trip" disabled>${Icons.svg('clock', 16)} Assign for 5 PM Trip</button>
+          <button class="btn" id="btn-assign-trip" disabled>${Icons.svg('clock', 16)} Allocate transport</button>
         </div>
         <div class="toolbar" id="trip-filters"></div>
         <div id="trip-grid">${spinner()}</div>
@@ -381,6 +412,7 @@
         await loadTripList(c); await loadTripStudents(c);
       } catch (e) { toast(e.message, 'error'); }
     });
+    c.querySelector('#btn-download-trip').addEventListener('click', () => downloadTripList());
   }
 
   async function loadTripList(c) {
@@ -389,17 +421,35 @@
     c.querySelector('#trip-date').textContent = `(${res.date}) — ${res.count} assigned`;
     if (!res.data.length) { box.innerHTML = '<div class="empty">No students assigned for today yet.</div>'; return; }
     box.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>Student ID</th><th>Name</th><th>Class</th><th>Category</th><th>Route</th><th>Bus</th><th>Action</th></tr></thead>
+      <thead><tr><th>Student ID</th><th>Name</th><th>Class</th><th>Category</th><th>Route</th><th>Bus</th><th>Added Date & Time</th><th>Action</th></tr></thead>
       <tbody>${res.data.map((t) => `<tr>
         <td>${esc(t.student_code)}</td><td>${esc(t.name)}</td><td>${esc(t.class || '-')}${t.section ? '-' + esc(t.section) : ''}</td>
         <td>${esc(t.category || '-')}</td><td>${t.route_number ? badge(t.route_number, 'blue') : '<span class="muted">-</span>'}</td>
         <td>${esc(t.bus_number || t.route_bus_number || '-')}</td>
+        <td>${fmtDateTime(t.created_at)}</td>
         <td><button class="icon-btn danger" data-rm="${t.trip_id}">Remove</button></td></tr>`).join('')}
       </tbody></table></div>`;
     box.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', async () => {
       try { await API.del(`/trips/${b.dataset.rm}`); toast('Removed from trip.', 'success'); await loadTripList(c); }
       catch (e) { toast(e.message, 'error'); }
     }));
+  }
+  async function downloadTripList() {
+    try {
+      const res = await API.get('/trips/today');
+      if (!res.data.length) { toast('No students assigned for today yet.', 'warning'); return; }
+      downloadCsv(`todays-trip-list-${res.date}.csv`, [
+        'Student ID', 'Name', 'Class', 'Category', 'Route', 'Bus', 'Added Date & Time',
+      ], res.data.map((t) => [
+        t.student_code,
+        t.name,
+        `${t.class || '-'}${t.section ? '-' + t.section : ''}`,
+        t.category || '-',
+        t.route_number || '-',
+        t.bus_number || t.route_bus_number || '-',
+        fmtDateTime(t.created_at),
+      ]));
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   async function setupTripSelector(c) {
@@ -537,7 +587,7 @@
   function updateTripBtn(c) {
     const b = c.querySelector('#btn-assign-trip');
     b.disabled = tripState.selected.size === 0;
-    b.innerHTML = `${Icons.svg('clock', 16)} ${tripState.selected.size ? `Assign ${tripState.selected.size} for 5 PM Trip` : 'Assign for 5 PM Trip'}`;
+    b.innerHTML = `${Icons.svg('clock', 16)} ${tripState.selected.size ? `Allocate transport for ${tripState.selected.size}` : 'Allocate transport'}`;
   }
 
   // ============================ BUSES ============================
@@ -565,16 +615,10 @@
         <td>${b.gps_link ? `<a href="${esc(b.gps_link)}" target="_blank" rel="noopener" class="icon-btn">${Icons.svg('pin', 15)} Track</a>` : '-'}</td>
         <td>${statusBadge(b.status)}</td>
         ${incharge ? `<td><div class="row-actions">
-          <button class="icon-btn" data-edit='${esc(JSON.stringify(b))}' title="Edit">${Icons.svg('edit', 15)}</button>
-          <button class="icon-btn danger" data-del="${b.id}" data-name="${esc(b.bus_number)}" title="Delete">${Icons.svg('trash', 15)}</button></div></td>` : ''}
+          <button class="icon-btn" data-edit='${esc(JSON.stringify(b))}' title="Edit">${Icons.svg('edit', 15)}</button></div></td>` : ''}
       </tr>`).join('')}</tbody></table></div>`;
     if (incharge) {
       grid.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => busForm(c, JSON.parse(b.dataset.edit))));
-      grid.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
-        if (!(await confirm({ title: 'Delete Bus', message: `Delete bus "${b.dataset.name}"?`, confirmText: 'Delete', danger: true }))) return;
-        try { await API.del(`/buses/${b.dataset.del}`); toast('Bus deleted.', 'success'); loadBuses(c); }
-        catch (e) { toast(e.message, 'error'); }
-      }));
     }
   }
   function busForm(c, bus) {
@@ -613,6 +657,13 @@
       <div class="section-head"><h2>Route Assignment</h2></div>
       <div class="card"><h2>Bus Occupancy</h2><div id="occ">${spinner()}</div></div>
       <div class="card">
+        <div class="section-head">
+          <h2>Route Wise Student Summary</h2>
+          <button class="btn secondary" id="btn-print-route-summary">${Icons.svg('download', 16)} Print</button>
+        </div>
+        <div id="route-summary">${spinner()}</div>
+      </div>
+      <div class="card">
         <div class="section-head"><h2>${incharge ? 'Manual Assignment' : 'Route Allocation (view only)'}</h2></div>
         ${incharge ? `<div class="toolbar">
           <span class="input-icon">${Icons.svg('search', 16)}<input id="a-search" placeholder="Search students"></span>
@@ -623,9 +674,11 @@
         </div>` : ''}
         <div id="assign-grid">${spinner()}</div>
       </div>`;
+    c.querySelector('#btn-print-route-summary').addEventListener('click', () => printRouteSummary(c));
     await loadOccupancy(c);
     if (incharge) {
-      const [filters, availableRoutes] = await Promise.all([API.get('/students/filters'), API.get('/routes/list')]);
+      const [todayTrips, availableRoutes] = await Promise.all([API.get('/trips/today'), API.get('/routes/list')]);
+      const tripRoutes = uniqueValues((todayTrips.data || []).map((trip) => trip.route_number));
       c.querySelector('#a-route-filter-wrap').innerHTML = `
         <div class="route-select filter-select" id="a-route-select">
           <button type="button" class="route-select-trigger" id="a-route-trigger">
@@ -639,7 +692,7 @@
               <button type="button" class="route-clear" id="a-route-clear">Clear</button>
             </div>
             <div class="route-option-list" id="a-route-list">
-              ${uniqueValues(filters.routes).map((route) => `
+              ${tripRoutes.map((route) => `
                 <label class="route-option">
                   <input type="checkbox" value="${esc(route)}">
                   <span>${esc(route)}</span>
@@ -713,10 +766,14 @@
       await loadAssignStudents(c);
     } else {
       c.querySelector('#assign-grid').innerHTML = '<div class="alert info">You have view-only access to route allocation.</div>';
+      await renderRouteStudentSummary(c.querySelector('#route-summary'), [], {
+        mode: 'todayRoute',
+        emptyMessage: 'Manual Assignment is not available for your access level.',
+      });
     }
   }
   async function loadOccupancy(c) {
-    const rows = (await API.get('/routes/occupancy')).filter((r) => r.bus_id);
+    const rows = (await API.get('/routes/occupancy?scope=trip')).filter((r) => r.bus_id);
     const box = c.querySelector('#occ');
     const canEdit = API.canAccess('route-assignment');
     if (!rows.length) { box.innerHTML = '<div class="empty">No buses configured yet.</div>'; return; }
@@ -732,6 +789,109 @@
       box.querySelectorAll('[data-bus-route]').forEach((button) => {
         button.addEventListener('click', () => editBusRoute(c, JSON.parse(button.dataset.busRoute), rows));
       });
+    }
+  }
+  function printRouteSummary(c) {
+    const table = c.querySelector('#route-summary table');
+    if (!table) { toast('No route summary available to print.', 'warning'); return; }
+    printHtml('Route Wise Student Summary', table.outerHTML);
+  }
+  async function renderRouteStudentSummary(box, sourceRows, { mode = 'category', emptyMessage = 'No active students found.' } = {}) {
+    if (!box) return;
+    box.innerHTML = spinner();
+    try {
+      const students = Array.isArray(sourceRows) ? sourceRows : [];
+      if (!Array.isArray(sourceRows)) {
+        let page = 1;
+        let totalPages = 1;
+        do {
+          const params = new URLSearchParams({
+            page: String(page), pageSize: '500', status: 'Active',
+            sort: 'route_number', dir: 'asc',
+          });
+          const res = await API.get(`/students?${params}`);
+          students.push(...(res.data || []));
+          totalPages = Number(res.totalPages) || 1;
+          page += 1;
+        } while (page <= totalPages);
+      }
+
+      if (!students.length) {
+        box.innerHTML = `<div class="empty">${esc(emptyMessage)}</div>`;
+        return;
+      }
+
+      if (mode === 'todayRoute') {
+        const todayRoutes = uniqueValues(students.map((s) => s.route_number || 'Unassigned'));
+        const actualRoutes = uniqueValues(students.map((s) => s.actual_route_number || 'Unassigned'));
+        const routeMap = new Map(actualRoutes.map((route) => [
+          route,
+          { route, total: 0, todayRoutes: Object.fromEntries(todayRoutes.map((r) => [r, 0])) },
+        ]));
+        students.forEach((student) => {
+          const actualRoute = String(student.actual_route_number || 'Unassigned');
+          const todayRoute = String(student.route_number || 'Unassigned');
+          if (!routeMap.has(actualRoute)) {
+            routeMap.set(actualRoute, {
+              route: actualRoute,
+              total: 0,
+              todayRoutes: Object.fromEntries(todayRoutes.map((r) => [r, 0])),
+            });
+          }
+          const row = routeMap.get(actualRoute);
+          if (row.todayRoutes[todayRoute] == null) row.todayRoutes[todayRoute] = 0;
+          row.todayRoutes[todayRoute] += 1;
+          row.total += 1;
+        });
+        const rows = [...routeMap.values()].sort((a, b) => {
+          if (a.route === 'Unassigned') return 1;
+          if (b.route === 'Unassigned') return -1;
+          return a.route.localeCompare(b.route, undefined, { numeric: true, sensitivity: 'base' });
+        });
+        box.innerHTML = `<div class="table-wrap"><table>
+          <thead><tr><th>Actual Route</th>${todayRoutes.map((route) => `<th>${esc(route)}</th>`).join('')}<th>Total</th></tr></thead>
+          <tbody>${rows.map((row) => `<tr>
+            <td>${row.route === 'Unassigned' ? '<span class="muted">Unassigned</span>' : badge(row.route, 'blue')}</td>
+            ${todayRoutes.map((route) => `<td>${row.todayRoutes[route] || 0}</td>`).join('')}
+            <td><b>${row.total}</b></td>
+          </tr>`).join('')}</tbody>
+          <tfoot><tr><th>Total</th>${todayRoutes.map((route) => `<th>${students.filter((student) => String(student.route_number || 'Unassigned') === route).length}</th>`).join('')}<th>${students.length}</th></tr></tfoot>
+        </table></div>`;
+        return;
+      }
+
+      const filters = await API.get('/students/filters');
+      const categories = uniqueValues([...(filters.categories || []), ...students.map((s) => s.category || 'Uncategorized')]);
+      const routeMap = new Map();
+      students.forEach((student) => {
+        const route = String(student.route_number || 'Unassigned');
+        const category = String(student.category || 'Uncategorized');
+        if (!routeMap.has(route)) {
+          routeMap.set(route, { route, total: 0, categories: Object.fromEntries(categories.map((c) => [c, 0])) });
+        }
+        const row = routeMap.get(route);
+        if (row.categories[category] == null) row.categories[category] = 0;
+        row.categories[category] += 1;
+        row.total += 1;
+      });
+
+      const rows = [...routeMap.values()].sort((a, b) => {
+        if (a.route === 'Unassigned') return 1;
+        if (b.route === 'Unassigned') return -1;
+        return a.route.localeCompare(b.route, undefined, { numeric: true, sensitivity: 'base' });
+      });
+
+      box.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>Route</th>${categories.map((category) => `<th>${esc(category)}</th>`).join('')}<th>Total</th></tr></thead>
+        <tbody>${rows.map((row) => `<tr>
+          <td>${row.route === 'Unassigned' ? '<span class="muted">Unassigned</span>' : badge(row.route, 'blue')}</td>
+          ${categories.map((category) => `<td>${row.categories[category] || 0}</td>`).join('')}
+          <td><b>${row.total}</b></td>
+        </tr>`).join('')}</tbody>
+        <tfoot><tr><th>Total</th>${categories.map((category) => `<th>${students.filter((student) => String(student.category || 'Uncategorized') === category).length}</th>`).join('')}<th>${students.length}</th></tr></tfoot>
+      </table></div>`;
+    } catch (e) {
+      box.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
     }
   }
   async function editBusRoute(c, bus, buses) {
@@ -774,18 +934,25 @@
     const grid = c.querySelector('#assign-grid');
     grid.innerHTML = spinner();
     const routes = [...c.querySelectorAll('#a-route-list input:checked')].map((input) => input.value);
-    const params = new URLSearchParams({
-      pageSize: 500, search: c.querySelector('#a-search').value.trim(),
-      route: routes.join(','),
+    const search = c.querySelector('#a-search').value.trim().toLowerCase();
+    const res = await API.get('/trips/today');
+    const rows = (res.data || []).filter((s) => {
+      const matchesRoute = !routes.length || routes.includes(String(s.route_number || ''));
+      const haystack = [s.student_code, s.name, s.class, s.section, s.category, s.route_number, s.actual_route_number].join(' ').toLowerCase();
+      return matchesRoute && (!search || haystack.includes(search));
     });
-    const res = await API.get(`/students?${params}`);
-    if (!res.data.length) { grid.innerHTML = '<div class="empty">No students found.</div>'; return; }
+    await renderRouteStudentSummary(c.querySelector('#route-summary'), rows, {
+      mode: 'todayRoute',
+      emptyMessage: 'No students shown in Manual Assignment.',
+    });
+    if (!rows.length) { grid.innerHTML = "<div class=\"empty\">No students found in today's trip list.</div>"; return; }
     grid.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th class="checkbox-cell"><input type="checkbox" id="a-all"></th><th>ID</th><th>Name</th><th>Class</th><th>Current Route</th></tr></thead>
-      <tbody>${res.data.map((s) => `<tr>
-        <td class="checkbox-cell"><input type="checkbox" class="a-check" value="${s.id}" ${assignState.selected.has(s.id) ? 'checked' : ''}></td>
+      <thead><tr><th class="checkbox-cell"><input type="checkbox" id="a-all"></th><th>ID</th><th>Name</th><th>Class</th><th>Today's Route</th><th>Actual Route</th></tr></thead>
+      <tbody>${rows.map((s) => `<tr>
+        <td class="checkbox-cell"><input type="checkbox" class="a-check" value="${s.student_id}" ${assignState.selected.has(s.student_id) ? 'checked' : ''}></td>
         <td>${esc(s.student_code)}</td><td>${esc(s.name)}</td><td>${esc(s.class || '-')}</td>
-        <td>${s.route_number ? badge(s.route_number, 'blue') : '<span class="muted">Unassigned</span>'}</td></tr>`).join('')}
+        <td>${s.route_number ? badge(s.route_number, 'blue') : '<span class="muted">Unassigned</span>'}</td>
+        <td>${s.actual_route_number ? badge(s.actual_route_number, 'gray') : '<span class="muted">Unassigned</span>'}</td></tr>`).join('')}
       </tbody></table></div>`;
     grid.querySelector('#a-all').addEventListener('change', (e) => {
       grid.querySelectorAll('.a-check').forEach((cb) => { cb.checked = e.target.checked; if (e.target.checked) assignState.selected.add(Number(cb.value)); else assignState.selected.delete(Number(cb.value)); });
@@ -807,9 +974,9 @@
     if (!route || !ids.length) return;
     try {
       const r = await API.post('/routes/assign', { studentIds: ids, route, force });
-      toast(`Assigned ${r.assigned} student(s) to ${route}.`, 'success');
+      toast(`Assigned ${r.assigned} student(s) to ${route} for today's trip.`, 'success');
       assignState.selected.clear();
-      await loadOccupancy(c); await loadAssignStudents(c);
+      await routeAssignment(c);
     } catch (e) {
       if (e.data && e.data.capacityWarning) {
         const d = e.data;
@@ -915,7 +1082,7 @@
         <div class="notif-control-panel">
           <div class="notif-field">
             <label>Audience</label>
-            <select id="n-scope"><option value="trip">Today's 5 PM Trip students</option><option value="route">By Route</option></select>
+            <select id="n-scope"><option value="trip">Today's allocated transport students</option><option value="route">By Route</option></select>
           </div>
           <div class="notif-field notif-route-field hidden" id="n-route-panel">
             <label>Routes</label>
@@ -941,13 +1108,14 @@
         <div id="n-status"></div>
         <div id="n-grid">${spinner()}</div>
       </div>`;
-    const filters = await API.get('/students/filters');
-    const routes = filters.routes || [];
+    const [filters, occupancy] = await Promise.all([API.get('/students/filters'), API.get('/routes/occupancy')]);
+    const routeCounts = new Map((occupancy || []).map((route) => [String(route.route_number || ''), Number(route.occupied) || 0]));
+    const routes = uniqueValues([...(filters.routes || []), ...(occupancy || []).map((route) => route.route_number)]);
     const routeList = content.querySelector('#n-route-list');
     routeList.innerHTML = routes.map((route) => `
       <label class="route-option">
         <input type="checkbox" value="${esc(route)}">
-        <span>${esc(route)}</span>
+        <span>${esc(route)} <span class="muted">(${routeCounts.get(String(route)) || 0} students)</span></span>
       </label>`).join('');
     const updateRouteCount = () => {
       const selected = [...routeList.querySelectorAll('input:checked')].map((input) => input.value);
@@ -985,6 +1153,7 @@
       content.querySelector('#n-route-panel').classList.toggle('hidden', !showRoutes);
       if (!showRoutes) closeRouteMenu();
       updateRouteCount();
+      loadNotifPreview(content);
     });
     content.querySelector('#n-refresh').addEventListener('click', () => loadNotifPreview(content));
     content.querySelector('#n-send').addEventListener('click', () => sendNotifs(content));
@@ -995,11 +1164,13 @@
     const grid = content.querySelector('#n-grid');
     grid.innerHTML = spinner();
     const scope = content.querySelector('#n-scope').value;
-    const routes = [...content.querySelectorAll('#n-route-list input:checked')].map((o) => o.value).filter(Boolean);
+    const routeInputs = [...content.querySelectorAll('#n-route-list input')];
+    const selectedRoutes = routeInputs.filter((o) => o.checked).map((o) => o.value).filter(Boolean);
+    const routes = selectedRoutes.length ? selectedRoutes : routeInputs.map((o) => o.value).filter(Boolean);
     const params = new URLSearchParams({ scope });
     if (scope === 'route') {
       if (!routes.length) {
-        grid.innerHTML = '<div class="empty">Select one or more routes and click Load.</div>';
+        grid.innerHTML = '<div class="empty">No routes available.</div>';
         content.querySelector('#n-status').innerHTML = '';
         updateNotifBtn(content);
         return;
@@ -1007,11 +1178,59 @@
       params.set('routes', routes.join(','));
     }
     const res = await API.get(`/notifications/preview?${params}`);
-    const scopeNote = scope === 'route' ? `<div class="alert info">Selected route(s): <b>${routes.map(esc).join(', ')}</b></div>` : '';
-    content.querySelector('#n-status').innerHTML = res.enabled
-      ? `${scopeNote}<div class="alert info">WhatsApp is LIVE (SmartPing).</div>`
-      : `${scopeNote}<div class="alert warn">WhatsApp is in <b>SIMULATION</b> mode (messages are logged as Sent but not actually delivered). Configure SmartPing in <code>.env</code> to go live.</div>`;
-    if (!res.data.length) { grid.innerHTML = '<div class="empty">No students to notify.</div>'; return; }
+    const scopeNote = scope === 'route'
+      ? (selectedRoutes.length
+        ? `<div class="alert info">Selected route(s): <b>${selectedRoutes.map(esc).join(', ')}</b></div>`
+        : '<div class="alert info">Showing all available routes.</div>')
+      : '';
+    content.querySelector('#n-status').innerHTML = scopeNote;
+    if (!res.data.length) {
+      grid.innerHTML = '<div class="empty">No students to notify.</div>';
+      updateNotifBtn(content);
+      return;
+    }
+    if (scope === 'route') {
+      const grouped = new Map(routes.map((route) => [String(route), { route: String(route), students: [] }]));
+      res.data.forEach((student) => {
+        const route = String(student.route_number || '');
+        if (!grouped.has(route)) grouped.set(route, { route, students: [] });
+        grouped.get(route).students.push(student);
+      });
+      const rows = [...grouped.values()].filter((row) => row.students.length);
+      grid.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th class="checkbox-cell"><input type="checkbox" id="n-all"></th><th>Route</th><th>Students</th><th>Ready</th><th>Bus</th><th>Status</th></tr></thead>
+        <tbody>${rows.map((row) => {
+          const readyStudents = row.students.filter((student) => student.ready);
+          const readyIds = readyStudents.map((student) => student.student_id);
+          const buses = uniqueValues(row.students.map((student) => student.bus_number || ''));
+          return `<tr>
+            <td class="checkbox-cell"><input type="checkbox" class="n-route-check" value="${esc(row.route)}" data-ids="${esc(readyIds.join(','))}" ${readyIds.length ? '' : 'disabled'}></td>
+            <td>${badge(row.route, 'blue')}</td>
+            <td>${row.students.length}</td>
+            <td>${readyStudents.length}</td>
+            <td>${buses.length ? buses.map(esc).join(', ') : '-'}</td>
+            <td>${readyIds.length ? badge('Ready', 'green') : badge('Missing data', 'amber')}</td>
+          </tr>`;
+        }).join('')}</tbody></table></div>`;
+      const setRouteIds = (input, checked) => {
+        input.checked = checked;
+        const ids = String(input.dataset.ids || '').split(',').map(Number).filter(Boolean);
+        ids.forEach((id) => {
+          if (checked) notifState.selected.add(id);
+          else notifState.selected.delete(id);
+        });
+      };
+      grid.querySelector('#n-all').addEventListener('change', (e) => {
+        grid.querySelectorAll('.n-route-check:not(:disabled)').forEach((cb) => setRouteIds(cb, e.target.checked));
+        updateNotifBtn(content);
+      });
+      grid.querySelectorAll('.n-route-check').forEach((cb) => cb.addEventListener('change', () => {
+        setRouteIds(cb, cb.checked);
+        updateNotifBtn(content);
+      }));
+      updateNotifBtn(content);
+      return;
+    }
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th class="checkbox-cell"><input type="checkbox" id="n-all"></th><th>Name</th><th>Mobile</th><th>Route</th><th>Bus</th><th>Tracking</th><th>Ready</th></tr></thead>
       <tbody>${res.data.map((s) => `<tr>

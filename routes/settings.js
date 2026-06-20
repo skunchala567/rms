@@ -11,7 +11,7 @@ const TYPES = ['class', 'section', 'category'];
 const PAGE_OPTIONS = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'students', label: 'Students' },
-  { key: 'trips', label: '5 PM Trips' },
+  { key: 'trips', label: 'Allocate transport' },
   { key: 'buses', label: 'Buses' },
   { key: 'route-assignment', label: 'Route Assignment' },
   { key: 'route-replacement', label: 'Route Replacement' },

@@ -7,15 +7,29 @@ const { authenticate, requirePageAccess } = require('../middleware/auth');
 const router = express.Router();
 router.use(authenticate);
 
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 // GET /api/routes/occupancy  -> route/bus capacity view
 router.get('/occupancy', async (req, res, next) => {
   try {
+    const scope = String(req.query.scope || '').toLowerCase();
+    const date = String(req.query.date || today());
     const buses = await db.prepare(`SELECT * FROM buses ORDER BY route_number, bus_number`).all();
-    const studentCounts = await db.prepare(`
-      SELECT route_number, COUNT(*) AS c FROM students
-      WHERE status = 'Active' AND route_number IS NOT NULL AND route_number <> ''
-      GROUP BY route_number
-    `).all();
+    const studentCounts = scope === 'trip'
+      ? await db.prepare(`
+          SELECT t.route_number, COUNT(*) AS c
+          FROM trip_assignments t
+          JOIN students s ON s.id = t.student_id
+          WHERE t.trip_date = ? AND s.status = 'Active' AND t.route_number IS NOT NULL AND t.route_number <> ''
+          GROUP BY t.route_number
+        `).all(date)
+      : await db.prepare(`
+          SELECT route_number, COUNT(*) AS c FROM students
+          WHERE status = 'Active' AND route_number IS NOT NULL AND route_number <> ''
+          GROUP BY route_number
+        `).all();
     const countMap = {};
     studentCounts.forEach((r) => { countMap[r.route_number] = r.c; });
 
@@ -92,24 +106,43 @@ async function routeOccupied(route, excludeIds = []) {
   }
   return (await db.get(sql, params)).c;
 }
+async function tripRouteOccupied(route, date) {
+  const row = await db.prepare(`
+    SELECT COUNT(*) AS c
+    FROM trip_assignments t
+    JOIN students s ON s.id = t.student_id
+    WHERE t.route_number = ? AND t.trip_date = ? AND s.status = 'Active'
+  `).get(route, date);
+  return Number(row.c) || 0;
+}
 
-// POST /api/routes/assign  -> assign selected students to a route (transport incharge only)
+// POST /api/routes/assign  -> assign selected students to a route for today's trip only
 router.post('/assign', requirePageAccess('route-assignment'), async (req, res, next) => {
   try {
-    const studentIds = Array.isArray(req.body.studentIds) ? req.body.studentIds : [];
+    const studentIds = Array.isArray(req.body.studentIds)
+      ? [...new Set(req.body.studentIds.map((id) => Number(id)).filter(Number.isFinite))]
+      : [];
+    const date = String(req.body.date || today());
     const route = String(req.body.route || '').trim();
     const force = !!req.body.force;
     if (!studentIds.length) return res.status(400).json({ error: 'No students selected.' });
     if (!route) return res.status(400).json({ error: 'Route is required.' });
 
-    const capacity = await routeCapacity(route);
-    const alreadyOnRoute = (await db.query(
-      `SELECT id FROM students WHERE route_number = ? AND id IN (${studentIds.map(() => '?').join(',')})`,
-      [route, ...studentIds]
-    )).map(r => r.id);
-    const newcomers = studentIds.filter((id) => !alreadyOnRoute.includes(id));
+    const tripRows = await db.query(
+      `SELECT student_id, route_number FROM trip_assignments
+       WHERE trip_date = ? AND student_id IN (${studentIds.map(() => '?').join(',')})`,
+      [date, ...studentIds]
+    );
+    if (!tripRows.length) return res.status(400).json({ error: 'Selected students are not in today\'s trip list.' });
+    const tripStudentIds = tripRows.map((row) => Number(row.student_id));
 
-    const currentOccupied = await routeOccupied(route);
+    const capacity = await routeCapacity(route);
+    const alreadyOnRoute = tripRows
+      .filter((row) => String(row.route_number || '') === route)
+      .map((row) => Number(row.student_id));
+    const newcomers = tripStudentIds.filter((id) => !alreadyOnRoute.includes(id));
+
+    const currentOccupied = await tripRouteOccupied(route, date);
     const projected = currentOccupied + newcomers.length;
 
     if (capacity > 0 && projected > capacity && !force) {
@@ -126,13 +159,18 @@ router.post('/assign', requirePageAccess('route-assignment'), async (req, res, n
       });
     }
 
+    const bus = await db.prepare(`SELECT id FROM buses WHERE route_number = ? AND status='Active' ORDER BY id LIMIT 1`).get(route);
     await db.transaction(async (t) => {
-      for (const id of studentIds) {
-        await t.run(`UPDATE students SET route_number = ?, updated_at = NOW() WHERE id = ?`, [route, id]);
+      for (const id of tripStudentIds) {
+        await t.run(`
+          UPDATE trip_assignments
+          SET route_number = ?, bus_id = ?, assigned_by = ?
+          WHERE trip_date = ? AND student_id = ?
+        `, [route, bus ? bus.id : null, req.user.id, date, id]);
       }
     });
 
-    res.json({ ok: true, assigned: studentIds.length, route, capacity, occupied: await routeOccupied(route) });
+    res.json({ ok: true, assigned: tripStudentIds.length, route, date, capacity, occupied: await tripRouteOccupied(route, date) });
   } catch (err) { next(err); }
 });
 

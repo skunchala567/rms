@@ -13,6 +13,16 @@ async function busForRoute(route) {
   if (!route) return null;
   return db.prepare(`SELECT * FROM buses WHERE route_number = ? AND status='Active' ORDER BY id LIMIT 1`).get(route);
 }
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+async function routeForTodayTrip(studentId) {
+  const row = await db.prepare(`
+    SELECT route_number FROM trip_assignments
+    WHERE student_id = ? AND trip_date = ?
+  `).get(studentId, today());
+  return row ? row.route_number : null;
+}
 
 // GET /api/notifications/preview
 router.get('/preview', async (req, res, next) => {
@@ -34,10 +44,12 @@ router.get('/preview', async (req, res, next) => {
         );
       }
     } else {
-      const date = String(req.query.date || new Date().toISOString().slice(0, 10));
+      const date = String(req.query.date || today());
       students = await db.prepare(`
-        SELECT s.* FROM trip_assignments t JOIN students s ON s.id = t.student_id
-        WHERE t.trip_date = ? ORDER BY s.name
+        SELECT s.id, s.student_code, s.name, s.class, s.section, s.category, s.parent_name, s.parent_mobile,
+               s.status, t.route_number
+        FROM trip_assignments t JOIN students s ON s.id = t.student_id
+        WHERE t.trip_date = ? ORDER BY t.route_number, s.name
       `).all(date);
     }
     const data = [];
@@ -74,7 +86,8 @@ router.post('/send', requirePageAccess('notifications'), async (req, res, next) 
     for (const id of ids) {
       const s = await db.prepare('SELECT * FROM students WHERE id = ?').get(id);
       if (!s) continue;
-      const bus = await busForRoute(s.route_number);
+      const route = await routeForTodayTrip(s.id) || s.route_number;
+      const bus = await busForRoute(route);
       const r = await whatsapp.sendOne({
         mobile: s.parent_mobile,
         studentName: s.name,
