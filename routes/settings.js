@@ -7,7 +7,7 @@ const { authenticate, requirePageAccess } = require('../middleware/auth');
 const router = express.Router();
 router.use(authenticate);
 
-const TYPES = ['class', 'section', 'category', 'route'];
+const TYPES = ['class', 'section', 'category'];
 const PAGE_OPTIONS = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'students', label: 'Students' },
@@ -23,7 +23,6 @@ const DEFAULTS = {
   class: ['Nursery', 'LKG', 'UKG', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'],
   section: ['A', 'B', 'C', 'D'],
   category: ['Stay Back Study Hours', 'Sports', 'IIT/JEE Coaching', 'Cultural Activities', 'Other'],
-  route: [],
 };
 
 function clean(value) {
@@ -77,10 +76,6 @@ async function ensureSeeded() {
     SELECT 'section' AS type, section AS value FROM students WHERE section IS NOT NULL AND section <> ''
     UNION
     SELECT 'category' AS type, category AS value FROM students WHERE category IS NOT NULL AND category <> ''
-    UNION
-    SELECT 'route' AS type, route_number AS value FROM students WHERE route_number IS NOT NULL AND route_number <> ''
-    UNION
-    SELECT 'route' AS type, route_number AS value FROM buses WHERE route_number IS NOT NULL AND route_number <> ''
   `);
 
   for (const row of rows) {
@@ -91,9 +86,9 @@ async function ensureSeeded() {
 }
 
 function groupOptions(rows) {
-  const grouped = { class: [], section: [], category: [], route: [] };
+  const grouped = { class: [], section: [], category: [] };
   rows.forEach((row) => {
-    grouped[row.type].push(row);
+    if (grouped[row.type]) grouped[row.type].push(row);
   });
   return grouped;
 }

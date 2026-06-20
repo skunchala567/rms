@@ -80,6 +80,8 @@ router.post('/', requirePageAccess('buses'), async (req, res, next) => {
     if (errors.length) return res.status(400).json({ error: errors.join(' '), errors });
     const dup = await db.prepare('SELECT id FROM buses WHERE bus_number = ?').get(data.bus_number);
     if (dup) return res.status(409).json({ error: `Bus Number "${data.bus_number}" already exists.` });
+    const routeDup = await db.prepare('SELECT bus_number FROM buses WHERE route_number = ?').get(data.route_number);
+    if (routeDup) return res.status(409).json({ error: `Route "${data.route_number}" is already selected for bus "${routeDup.bus_number}".` });
 
     const info = await db.prepare(`
       INSERT INTO buses (bus_number, route_number, seating_capacity, gps_link, driver_name, driver_mobile, status)
@@ -105,6 +107,10 @@ router.put('/:id', requirePageAccess('buses'), async (req, res, next) => {
     if (data.bus_number && data.bus_number !== bus.bus_number) {
       const dup = await db.prepare('SELECT id FROM buses WHERE bus_number = ? AND id <> ?').get(data.bus_number, bus.id);
       if (dup) return res.status(409).json({ error: `Bus Number "${data.bus_number}" already exists.` });
+    }
+    if (data.route_number && data.route_number !== bus.route_number) {
+      const routeDup = await db.prepare('SELECT bus_number FROM buses WHERE route_number = ? AND id <> ?').get(data.route_number, bus.id);
+      if (routeDup) return res.status(409).json({ error: `Route "${data.route_number}" is already selected for bus "${routeDup.bus_number}".` });
     }
     const m = { ...bus, ...data };
     await db.prepare(`

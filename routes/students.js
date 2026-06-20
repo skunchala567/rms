@@ -104,10 +104,36 @@ router.get('/', async (req, res, next) => {
       where.push('(s.name LIKE @search OR s.student_code LIKE @search OR s.parent_mobile LIKE @search)');
       params.search = `%${search}%`;
     }
-    if (cls) { where.push('s.class = @cls'); params.cls = cls; }
+    if (cls) {
+      const classes = String(cls).split(',').map(clean).filter(Boolean);
+      if (classes.length === 1) {
+        where.push('s.class = @cls');
+        params.cls = classes[0];
+      } else if (classes.length > 1) {
+        const keys = classes.map((value, index) => {
+          const key = `cls${index}`;
+          params[key] = value;
+          return `@${key}`;
+        });
+        where.push(`s.class IN (${keys.join(',')})`);
+      }
+    }
     if (section) { where.push('s.section = @section'); params.section = section; }
     if (category) { where.push('s.category = @category'); params.category = category; }
-    if (route) { where.push('s.route_number = @route'); params.route = route; }
+    if (route) {
+      const routes = String(route).split(',').map(clean).filter(Boolean);
+      if (routes.length === 1) {
+        where.push('s.route_number = @route');
+        params.route = routes[0];
+      } else if (routes.length > 1) {
+        const keys = routes.map((value, index) => {
+          const key = `route${index}`;
+          params[key] = value;
+          return `@${key}`;
+        });
+        where.push(`s.route_number IN (${keys.join(',')})`);
+      }
+    }
     if (status) { where.push('s.status = @status'); params.status = status; }
 
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -320,11 +346,12 @@ router.post('/bulk-upload/import', upload.single('file'), async (req, res) => {
     const { validRows, errorCount, errors } = buildBulkPreview(rows);
 
     const sql = `
-      INSERT INTO students (student_code, name, class, section, category, parent_mobile, status)
-      VALUES (:student_code, :name, :class, :section, :category, :parent_mobile, 'Active')
+      INSERT INTO students (student_code, name, class, section, category, parent_mobile, route_number, status)
+      VALUES (:student_code, :name, :class, :section, :category, :parent_mobile, :route_number, 'Active')
       ON DUPLICATE KEY UPDATE
         name=VALUES(name), class=VALUES(class), section=VALUES(section),
-        category=VALUES(category), parent_mobile=VALUES(parent_mobile), updated_at=NOW()
+        category=VALUES(category), parent_mobile=VALUES(parent_mobile),
+        route_number=COALESCE(VALUES(route_number), route_number), updated_at=NOW()
     `;
     await db.transaction(async (t) => {
       for (const r of validRows) await t.run(sql, r.data);
@@ -359,6 +386,7 @@ function buildBulkPreview(rows) {
       section: String(pick(row, ['section']) || '').trim(),
       category: String(pick(row, ['category', 'categoryofdrop']) || '').trim(),
       parent_mobile: String(pick(row, ['parentmobile', 'parentmobilenumber', 'mobile']) || '').trim(),
+      route_number: String(pick(row, ['routeno', 'routenumber', 'currentroutenumber', 'route']) || '').trim(),
     };
     const rowErrors = [];
     const codeError = validateCode(data.student_code, 'Student ID', { required: true });
@@ -373,11 +401,16 @@ function buildBulkPreview(rows) {
     const categoryError = validateSettingValue(data.category, 'Category of Drop', { required: true });
     if (categoryError) rowErrors.push(categoryError);
     if (mobileError) rowErrors.push(mobileError);
+    const routeError = validateCode(data.route_number, 'Route No');
+    if (routeError) rowErrors.push(routeError);
     if (data.student_code) {
       if (seenCodes.has(data.student_code)) rowErrors.push('Duplicate Student ID in file');
       seenCodes.add(data.student_code);
     }
-    if (!rowErrors.length) data.parent_mobile = normalizeMobile(data.parent_mobile);
+    if (!rowErrors.length) {
+      data.parent_mobile = normalizeMobile(data.parent_mobile);
+      data.route_number = data.route_number || null;
+    }
 
     if (rowErrors.length) {
       errors.push({ row: rowNo, student_code: data.student_code, name: data.name, messages: rowErrors });

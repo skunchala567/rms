@@ -59,6 +59,25 @@ router.get('/list', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PUT /api/routes/bus/:id/route  -> update one bus route from Route Assignment
+router.put('/bus/:id/route', requirePageAccess('route-assignment'), async (req, res, next) => {
+  try {
+    const route = String(req.body.route_number || '').trim();
+    if (!route) return res.status(400).json({ error: 'Route Number is required.' });
+
+    const bus = await db.prepare('SELECT * FROM buses WHERE id = ?').get(req.params.id);
+    if (!bus) return res.status(404).json({ error: 'Bus not found.' });
+
+    const conflict = await db.prepare('SELECT id, bus_number FROM buses WHERE route_number = ? AND id <> ?').get(route, bus.id);
+    if (conflict) {
+      return res.status(409).json({ error: `Route "${route}" is already selected for bus "${conflict.bus_number}".` });
+    }
+
+    await db.prepare('UPDATE buses SET route_number = ?, updated_at = NOW() WHERE id = ?').run(route, bus.id);
+    res.json({ ok: true, bus_id: bus.id, route_number: route });
+  } catch (err) { next(err); }
+});
+
 // Capacity for a given route (sum of active buses' capacity)
 async function routeCapacity(route) {
   const row = await db.prepare(`SELECT COALESCE(SUM(seating_capacity),0) AS cap FROM buses WHERE route_number = ? AND status = 'Active'`).get(route);

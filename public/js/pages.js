@@ -14,6 +14,16 @@
   function optionValues(rows) {
     return (rows || []).filter((r) => r.status !== 'Inactive').map((r) => r.value);
   }
+  function uniqueValues(list) {
+    return [...new Set((list || []).map((v) => String(v || '').trim()).filter(Boolean))].sort();
+  }
+  function dataList(id, values) {
+    return `<datalist id="${esc(id)}">${uniqueValues(values).map((v) => `<option value="${esc(v)}"></option>`).join('')}</datalist>`;
+  }
+  function routeSearchInput(name, value, routes, placeholder = 'Search route number') {
+    const listId = `route-list-${Math.random().toString(36).slice(2, 9)}`;
+    return `<input name="${esc(name)}" value="${esc(value || '')}" list="${esc(listId)}" placeholder="${esc(placeholder)}" autocomplete="off">${dataList(listId, routes)}`;
+  }
   async function getStudentSettings() {
     return API.get('/settings/student-options');
   }
@@ -96,8 +106,10 @@
       <select id="f-class"><option value="">All Classes</option>${options(filters.classes, f.class)}</select>
       <select id="f-section"><option value="">All Sections</option>${options(filters.sections, f.section)}</select>
       <select id="f-category"><option value="">All Categories</option>${options(CATEGORIES, f.category)}</select>
-      <select id="f-route"><option value="">All Routes</option>${options(filters.routes, f.route)}</select>
-      <select id="f-status"><option value="">All Status</option>${options(['Active', 'Inactive'], f.status)}</select>`;
+      ${routeSearchInput('route', f.route || '', filters.routes, 'All Routes')}
+      <select id="f-status"><option value="">All Status</option>${options(['Active', 'Inactive'], f.status)}</select>
+      <button class="btn secondary sm" id="f-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>`;
+    c.querySelector('input[name="route"]').id = 'f-route';
     const apply = () => {
       studentState.filters = {
         search: c.querySelector('#f-search').value.trim(),
@@ -113,8 +125,16 @@
     };
     let t;
     c.querySelector('#f-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 350); });
-    ['#f-class', '#f-section', '#f-category', '#f-route', '#f-status'].forEach((id) =>
+    c.querySelector('#f-route').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 350); });
+    ['#f-class', '#f-section', '#f-category', '#f-status'].forEach((id) =>
       c.querySelector(id).addEventListener('change', apply));
+    c.querySelector('#f-clear').addEventListener('click', () => {
+      studentState.filters = {};
+      studentState.page = 1;
+      studentState.selected.clear();
+      renderFilters(c, filters);
+      loadStudents(c);
+    });
   }
 
   async function loadStudents(c) {
@@ -212,12 +232,13 @@
     const editing = !!student;
     const s = student || {};
     let settings;
-    try { settings = await getStudentSettings(); }
+    let filters;
+    try { [settings, filters] = await Promise.all([getStudentSettings(), API.get('/students/filters')]); }
     catch (e) { toast(e.message, 'error'); return; }
     const classOptions = optionValues(settings.class);
     const sectionOptions = optionValues(settings.section);
     const categoryOptions = optionValues(settings.category);
-    const routeOptions = optionValues(settings.route);
+    const routeOptions = uniqueValues([...(filters.routes || []), s.route_number]);
     modal({
       title: editing ? 'Edit Student' : 'Add Student',
       size: 'lg',
@@ -230,7 +251,7 @@
           ${field('Category of Drop', `<select name="category" required><option value="">-- Select --</option>${options(categoryOptions, s.category)}</select>`, true)}
           ${field('Parent Name', `<input name="parent_name" value="${esc(s.parent_name || '')}" minlength="2" maxlength="150" pattern="[A-Za-z .'-]*[A-Za-z][A-Za-z .'-]*" title="Use letters, spaces, dot, apostrophe, or hyphen." required>`, true)}
           ${field('Parent Mobile Number', `<input name="parent_mobile" type="tel" inputmode="numeric" value="${esc(s.parent_mobile || '')}" pattern="(?:\\+?91|0)?[6-9][0-9]{9}" title="Enter a valid 10-digit Indian mobile number." required>`, true)}
-          ${field('Current Route Number', `<select name="route_number"><option value="">Awaiting Route Assignment</option>${options(routeOptions, s.route_number)}</select>`)}
+          ${field('Current Route Number', routeSearchInput('route_number', s.route_number, routeOptions, 'Awaiting Route Assignment'))}
           ${field('Status', `<select name="status" required>${options(['Active', 'Inactive'], s.status || 'Active')}</select>`, true)}
         </div>
       </form>`,
@@ -275,7 +296,7 @@
       size: 'lg',
       body: `
         <div class="alert info">Upload an <b>Excel (.xlsx)</b> or <b>CSV</b> with columns:
-          <b>Student ID, Student Name, Class, Section, Category, Parent Mobile</b>.
+          <b>Student ID, Student Name, Class, Section, Category, Parent Mobile, Route No</b>.
           <a href="#" id="dl-template">Download template</a></div>
         <div class="field"><input type="file" id="bulk-file" accept=".xlsx,.xls,.csv"></div>
         <div id="bulk-result"></div>`,
@@ -286,7 +307,7 @@
         let file = null;
         el.querySelector('#dl-template').addEventListener('click', (e) => {
           e.preventDefault();
-          const csv = 'Student ID,Student Name,Class,Section,Category,Parent Mobile\nS100,John Doe,10,A,Stay Back Study Hours,9876543210\n';
+          const csv = 'Student ID,Student Name,Class,Section,Category,Parent Mobile,Route No\nS100,John Doe,10,A,Stay Back Study Hours,9876543210,R10\n';
           const a = document.createElement('a');
           a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
           a.download = 'student-upload-template.csv'; a.click();
@@ -385,21 +406,100 @@
     const filters = await API.get('/students/filters');
     c.querySelector('#trip-filters').innerHTML = `
       <span class="input-icon">${Icons.svg('search', 16)}<input id="t-search" placeholder="Search"></span>
-      <select id="t-class"><option value="">All Classes</option>${options(filters.classes, '')}</select>
+      <div class="route-select filter-select" id="t-class-select">
+        <button type="button" class="route-select-trigger" id="t-class-trigger">
+          <span id="t-class-label">All Classes</span>
+          ${Icons.svg('chevDown', 16)}
+        </button>
+        <div class="route-select-menu filter-select-menu hidden" id="t-class-menu">
+          <input class="filter-select-search" id="t-class-search" placeholder="Search class" autocomplete="off">
+          <div class="route-select-head">
+            <span id="t-class-count">0 selected</span>
+            <button type="button" class="route-clear" id="t-class-clear">Clear</button>
+          </div>
+          <div class="route-option-list" id="t-class-list">
+            ${uniqueValues(filters.classes).map((cls) => `
+              <label class="route-option">
+                <input type="checkbox" value="${esc(cls)}">
+                <span>${esc(cls)}</span>
+              </label>`).join('')}
+          </div>
+        </div>
+      </div>
       <select id="t-section"><option value="">All Sections</option>${options(filters.sections, '')}</select>
       <select id="t-category"><option value="">All Categories</option>${options(CATEGORIES, '')}</select>
-      <select id="t-route"><option value="">All Routes</option>${options(filters.routes, '')}</select>`;
+      ${routeSearchInput('route', '', filters.routes, 'All Routes')}
+      <button class="btn secondary sm" id="t-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>`;
+    c.querySelector('#trip-filters input[name="route"]').id = 't-route';
+    const classSelect = c.querySelector('#t-class-select');
+    const classMenu = c.querySelector('#t-class-menu');
+    const classList = c.querySelector('#t-class-list');
+    const updateClassFilter = () => {
+      const selected = [...classList.querySelectorAll('input:checked')].map((input) => input.value);
+      c.querySelector('#t-class-count').textContent = `${selected.length} selected`;
+      c.querySelector('#t-class-label').textContent = selected.length
+        ? (selected.length <= 2 ? selected.join(', ') : `${selected.length} classes selected`)
+        : 'All Classes';
+      classList.querySelectorAll('.route-option').forEach((option) => {
+        option.classList.toggle('selected', option.querySelector('input').checked);
+      });
+      return selected;
+    };
     const apply = () => {
+      const selectedClasses = updateClassFilter();
       tripState.filters = {
         search: c.querySelector('#t-search').value.trim(),
-        class: c.querySelector('#t-class').value, section: c.querySelector('#t-section').value,
+        class: selectedClasses.join(','), section: c.querySelector('#t-section').value,
         category: c.querySelector('#t-category').value, route: c.querySelector('#t-route').value,
       };
       loadTripStudents(c);
     };
+    const closeClassMenu = () => {
+      classMenu.classList.add('hidden');
+      classSelect.classList.remove('open');
+    };
+    c.querySelector('#t-class-trigger').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = classMenu.classList.contains('hidden');
+      classMenu.classList.toggle('hidden', !willOpen);
+      classSelect.classList.toggle('open', willOpen);
+      if (willOpen) c.querySelector('#t-class-search').focus();
+    });
+    c.addEventListener('click', (e) => {
+      if (!classSelect.contains(e.target)) closeClassMenu();
+    });
+    classList.querySelectorAll('input').forEach((input) => input.addEventListener('change', apply));
+    c.querySelector('#t-class-clear').addEventListener('click', (e) => {
+      e.preventDefault();
+      classList.querySelectorAll('input').forEach((input) => { input.checked = false; });
+      c.querySelector('#t-class-search').value = '';
+      classList.querySelectorAll('.route-option').forEach((option) => option.classList.remove('hidden'));
+      apply();
+    });
+    c.querySelector('#t-class-search').addEventListener('input', (e) => {
+      const term = e.target.value.trim().toLowerCase();
+      classList.querySelectorAll('.route-option').forEach((option) => {
+        option.classList.toggle('hidden', !!term && !option.textContent.toLowerCase().includes(term));
+      });
+    });
+    updateClassFilter();
     let t;
     c.querySelector('#t-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 300); });
-    ['#t-class', '#t-section', '#t-category', '#t-route'].forEach((id) => c.querySelector(id).addEventListener('change', apply));
+    c.querySelector('#t-route').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 300); });
+    ['#t-section', '#t-category'].forEach((id) => c.querySelector(id).addEventListener('change', apply));
+    c.querySelector('#t-clear').addEventListener('click', () => {
+      c.querySelector('#t-search').value = '';
+      c.querySelector('#t-section').value = '';
+      c.querySelector('#t-category').value = '';
+      c.querySelector('#t-route').value = '';
+      c.querySelector('#t-class-search').value = '';
+      classList.querySelectorAll('input').forEach((input) => { input.checked = false; });
+      classList.querySelectorAll('.route-option').forEach((option) => option.classList.remove('hidden'));
+      closeClassMenu();
+      tripState.filters = {};
+      updateClassFilter();
+      loadTripStudents(c);
+    });
     await loadTripStudents(c);
   }
 
@@ -511,26 +611,104 @@
     const incharge = API.canAccess('route-assignment');
     c.innerHTML = `
       <div class="section-head"><h2>Route Assignment</h2></div>
-      <div class="card"><h2>Route Occupancy</h2><div id="occ">${spinner()}</div></div>
+      <div class="card"><h2>Bus Occupancy</h2><div id="occ">${spinner()}</div></div>
       <div class="card">
         <div class="section-head"><h2>${incharge ? 'Manual Assignment' : 'Route Allocation (view only)'}</h2></div>
         ${incharge ? `<div class="toolbar">
           <span class="input-icon">${Icons.svg('search', 16)}<input id="a-search" placeholder="Search students"></span>
-          <select id="a-route-filter"><option value="">All Routes</option></select>
-          <select id="a-target"><option value="">-- Select Route to assign --</option></select>
+          <span id="a-route-filter-wrap"></span>
+          <span id="a-target-wrap"></span>
+          <button class="btn secondary sm" id="a-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
           <button class="btn" id="btn-assign-route" disabled>Assign to Route</button>
         </div>` : ''}
         <div id="assign-grid">${spinner()}</div>
       </div>`;
     await loadOccupancy(c);
     if (incharge) {
-      const routes = await API.get('/routes/list');
-      c.querySelector('#a-route-filter').innerHTML = `<option value="">All Routes</option>${options(routes, '')}`;
-      c.querySelector('#a-target').innerHTML = `<option value="">-- Select Route to assign --</option>${options(routes, '')}`;
+      const [filters, availableRoutes] = await Promise.all([API.get('/students/filters'), API.get('/routes/list')]);
+      c.querySelector('#a-route-filter-wrap').innerHTML = `
+        <div class="route-select filter-select" id="a-route-select">
+          <button type="button" class="route-select-trigger" id="a-route-trigger">
+            <span id="a-route-label">All Routes</span>
+            ${Icons.svg('chevDown', 16)}
+          </button>
+          <div class="route-select-menu filter-select-menu hidden" id="a-route-menu">
+            <input class="filter-select-search" id="a-route-search" placeholder="Search route" autocomplete="off">
+            <div class="route-select-head">
+              <span id="a-route-count">0 selected</span>
+              <button type="button" class="route-clear" id="a-route-clear">Clear</button>
+            </div>
+            <div class="route-option-list" id="a-route-list">
+              ${uniqueValues(filters.routes).map((route) => `
+                <label class="route-option">
+                  <input type="checkbox" value="${esc(route)}">
+                  <span>${esc(route)}</span>
+                </label>`).join('')}
+            </div>
+          </div>
+        </div>`;
+      c.querySelector('#a-target-wrap').innerHTML = routeSearchInput('route', '', availableRoutes, 'Route to assign');
+      c.querySelector('#a-target-wrap input').id = 'a-target';
+      const routeSelect = c.querySelector('#a-route-select');
+      const routeMenu = c.querySelector('#a-route-menu');
+      const routeList = c.querySelector('#a-route-list');
+      const selectedAssignRoutes = () => [...routeList.querySelectorAll('input:checked')].map((input) => input.value);
+      const updateAssignRouteFilter = () => {
+        const selected = selectedAssignRoutes();
+        c.querySelector('#a-route-count').textContent = `${selected.length} selected`;
+        c.querySelector('#a-route-label').textContent = selected.length
+          ? (selected.length <= 2 ? selected.join(', ') : `${selected.length} routes selected`)
+          : 'All Routes';
+        routeList.querySelectorAll('.route-option').forEach((option) => {
+          option.classList.toggle('selected', option.querySelector('input').checked);
+        });
+        return selected;
+      };
+      const closeAssignRouteMenu = () => {
+        routeMenu.classList.add('hidden');
+        routeSelect.classList.remove('open');
+      };
+      c.querySelector('#a-route-trigger').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const willOpen = routeMenu.classList.contains('hidden');
+        routeMenu.classList.toggle('hidden', !willOpen);
+        routeSelect.classList.toggle('open', willOpen);
+        if (willOpen) c.querySelector('#a-route-search').focus();
+      });
+      c.addEventListener('click', (e) => {
+        if (!routeSelect.contains(e.target)) closeAssignRouteMenu();
+      });
+      routeList.querySelectorAll('input').forEach((input) => input.addEventListener('change', () => {
+        updateAssignRouteFilter();
+        loadAssignStudents(c);
+      }));
+      c.querySelector('#a-route-clear').addEventListener('click', (e) => {
+        e.preventDefault();
+        routeList.querySelectorAll('input').forEach((input) => { input.checked = false; });
+        c.querySelector('#a-route-search').value = '';
+        routeList.querySelectorAll('.route-option').forEach((option) => option.classList.remove('hidden'));
+        updateAssignRouteFilter();
+        loadAssignStudents(c);
+      });
+      c.querySelector('#a-route-search').addEventListener('input', (e) => {
+        const term = e.target.value.trim().toLowerCase();
+        routeList.querySelectorAll('.route-option').forEach((option) => {
+          option.classList.toggle('hidden', !!term && !option.textContent.toLowerCase().includes(term));
+        });
+      });
+      updateAssignRouteFilter();
       let t;
       c.querySelector('#a-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => loadAssignStudents(c), 300); });
-      c.querySelector('#a-route-filter').addEventListener('change', () => loadAssignStudents(c));
-      c.querySelector('#a-target').addEventListener('change', () => updateAssignBtn(c));
+      c.querySelector('#a-target').addEventListener('input', () => updateAssignBtn(c));
+      c.querySelector('#a-clear').addEventListener('click', () => {
+        c.querySelector('#a-search').value = '';
+        routeList.querySelectorAll('input').forEach((input) => { input.checked = false; });
+        c.querySelector('#a-route-search').value = '';
+        routeList.querySelectorAll('.route-option').forEach((option) => option.classList.remove('hidden'));
+        closeAssignRouteMenu();
+        updateAssignRouteFilter();
+        loadAssignStudents(c);
+      });
       c.querySelector('#btn-assign-route').addEventListener('click', () => doAssign(c, false));
       await loadAssignStudents(c);
     } else {
@@ -538,23 +716,67 @@
     }
   }
   async function loadOccupancy(c) {
-    const rows = await API.get('/routes/occupancy');
+    const rows = (await API.get('/routes/occupancy')).filter((r) => r.bus_id);
     const box = c.querySelector('#occ');
-    if (!rows.length) { box.innerHTML = '<div class="empty">No routes/buses configured.</div>'; return; }
+    const canEdit = API.canAccess('route-assignment');
+    if (!rows.length) { box.innerHTML = '<div class="empty">No buses configured yet.</div>'; return; }
     box.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>Route</th><th>Bus</th><th>Capacity</th><th>Occupied</th><th>Available</th><th>Occupancy</th></tr></thead>
+      <thead><tr><th>Bus</th><th>Route</th><th>Capacity</th><th>Occupied</th><th>Available</th><th>Occupancy</th><th>Status</th>${canEdit ? '<th>Actions</th>' : ''}</tr></thead>
       <tbody>${rows.map((r) => `<tr>
-        <td>${badge(r.route_number, 'blue')}</td><td>${esc(r.bus_number || '<span class="muted">No bus</span>')}</td>
+        <td><b>${esc(r.bus_number || '-')}</b></td><td>${badge(r.route_number, 'blue')}</td>
         <td>${r.capacity}</td><td>${r.occupied}</td><td>${r.available}</td>
-        <td>${occupancyBar(r.occupied, r.capacity)}</td></tr>`).join('')}
+        <td>${occupancyBar(r.occupied, r.capacity)}</td><td>${statusBadge(r.status || 'Active')}</td>
+        ${canEdit ? `<td><button class="icon-btn" data-bus-route='${esc(JSON.stringify(r))}' title="Edit route">${Icons.svg('edit', 15)} Edit</button></td>` : ''}</tr>`).join('')}
       </tbody></table></div>`;
+    if (canEdit) {
+      box.querySelectorAll('[data-bus-route]').forEach((button) => {
+        button.addEventListener('click', () => editBusRoute(c, JSON.parse(button.dataset.busRoute), rows));
+      });
+    }
+  }
+  async function editBusRoute(c, bus, buses) {
+    const allRoutes = await API.get('/routes/list');
+    const usedByOtherBus = new Set((buses || [])
+      .filter((b) => b.bus_id !== bus.bus_id && b.route_number)
+      .map((b) => String(b.route_number)));
+    const routeOptions = uniqueValues([...allRoutes, bus.route_number]);
+    modal({
+      title: `Edit Route - ${bus.bus_number}`,
+      body: `<form id="bus-route-form">
+        ${field('Route Number', `<select name="route_number" required>
+          <option value="">-- Select Route --</option>
+          ${routeOptions.map((route) => {
+            const disabled = usedByOtherBus.has(String(route)) ? 'disabled' : '';
+            const note = disabled ? ' (already assigned)' : '';
+            return `<option value="${esc(route)}" ${String(route) === String(bus.route_number) ? 'selected' : ''} ${disabled}>${esc(route)}${note}</option>`;
+          }).join('')}
+        </select>`, true)}
+      </form>`,
+      footer: `<button class="btn secondary" data-close>Cancel</button><button class="btn" id="save-bus-route">Update Route</button>`,
+      onMount: (el, close) => {
+        el.querySelector('#save-bus-route').addEventListener('click', async () => {
+          const form = el.querySelector('#bus-route-form');
+          if (!form.reportValidity()) return;
+          const data = Object.fromEntries(new FormData(form).entries());
+          const btn = el.querySelector('#save-bus-route');
+          btn.disabled = true;
+          try {
+            await API.put(`/routes/bus/${bus.bus_id}/route`, data);
+            toast('Bus route updated.', 'success');
+            close();
+            await loadOccupancy(c);
+          } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+        });
+      },
+    });
   }
   async function loadAssignStudents(c) {
     const grid = c.querySelector('#assign-grid');
     grid.innerHTML = spinner();
+    const routes = [...c.querySelectorAll('#a-route-list input:checked')].map((input) => input.value);
     const params = new URLSearchParams({
       pageSize: 500, search: c.querySelector('#a-search').value.trim(),
-      route: c.querySelector('#a-route-filter').value,
+      route: routes.join(','),
     });
     const res = await API.get(`/students?${params}`);
     if (!res.data.length) { grid.innerHTML = '<div class="empty">No students found.</div>'; return; }
@@ -609,17 +831,20 @@
       <div class="card">
         <div class="alert info">Replacing a route updates <b>all students</b> currently on the old route. The change is recorded in the audit log.</div>
         <div class="toolbar">
-          <select id="old-route"><option value="">-- Existing Route --</option></select>
+          <span id="old-route-wrap"></span>
           <span style="color:var(--accent)">${Icons.svg('arrowRight', 22)}</span>
-          <select id="new-route"><option value="">-- New Route --</option></select>
+          <span id="new-route-wrap"></span>
           <button class="btn" id="btn-preview">Preview</button>
         </div>
         <div id="repl-preview"></div>
       </div>
       <div class="card"><h2>Replacement Audit Log</h2><div id="repl-log">${spinner()}</div></div>`;
-    const routes = await API.get('/routes/list');
-    c.querySelector('#old-route').innerHTML = `<option value="">-- Existing Route --</option>${options(routes, '')}`;
-    c.querySelector('#new-route').innerHTML = `<option value="">-- New Route --</option>${options(routes, '')}`;
+    const filters = await API.get('/students/filters');
+    const routes = filters.routes || [];
+    c.querySelector('#old-route-wrap').innerHTML = routeSearchInput('oldRoute', '', filters.routes, 'Existing Route');
+    c.querySelector('#old-route-wrap input').id = 'old-route';
+    c.querySelector('#new-route-wrap').innerHTML = routeSearchInput('newRoute', '', routes, 'New Route');
+    c.querySelector('#new-route-wrap input').id = 'new-route';
     c.querySelector('#btn-preview').addEventListener('click', () => previewReplace(c));
     await loadReplLog(c);
   }
@@ -692,38 +917,73 @@
             <label>Audience</label>
             <select id="n-scope"><option value="trip">Today's 5 PM Trip students</option><option value="route">By Route</option></select>
           </div>
+          <div class="notif-field notif-route-field hidden" id="n-route-panel">
+            <label>Routes</label>
+            <div class="route-select" id="n-route-select">
+              <button type="button" class="route-select-trigger" id="n-route-trigger">
+                <span id="n-route-label">Select routes</span>
+                ${Icons.svg('chevDown', 16)}
+              </button>
+              <div class="route-select-menu hidden" id="n-route-menu">
+                <div class="route-select-head">
+                  <span id="n-route-count">0 selected</span>
+                  <button type="button" class="route-clear" id="n-route-clear">Clear</button>
+                </div>
+                <div class="route-option-list" id="n-route-list"></div>
+              </div>
+            </div>
+          </div>
           <div class="notif-actions">
             <button class="btn secondary" id="n-refresh">${Icons.svg('refresh', 16)} Load</button>
             <button class="btn success" id="n-send" disabled>${Icons.svg('send', 16)} Send Route Notification</button>
-          </div>
-          <div class="notif-route-panel hidden" id="n-route-panel">
-            <div class="notif-panel-head">
-              <label>Routes</label>
-              <span id="n-route-count">0 selected</span>
-            </div>
-            <div class="route-chip-grid" id="n-route-list"></div>
           </div>
         </div>
         <div id="n-status"></div>
         <div id="n-grid">${spinner()}</div>
       </div>`;
-    const routes = await API.get('/routes/list');
+    const filters = await API.get('/students/filters');
+    const routes = filters.routes || [];
     const routeList = content.querySelector('#n-route-list');
     routeList.innerHTML = routes.map((route) => `
-      <label class="route-chip">
+      <label class="route-option">
         <input type="checkbox" value="${esc(route)}">
         <span>${esc(route)}</span>
       </label>`).join('');
     const updateRouteCount = () => {
-      const count = routeList.querySelectorAll('input:checked').length;
-      content.querySelector('#n-route-count').textContent = `${count} selected`;
-      routeList.querySelectorAll('.route-chip').forEach((chip) => {
-        chip.classList.toggle('selected', chip.querySelector('input').checked);
+      const selected = [...routeList.querySelectorAll('input:checked')].map((input) => input.value);
+      content.querySelector('#n-route-count').textContent = `${selected.length} selected`;
+      content.querySelector('#n-route-label').textContent = selected.length
+        ? (selected.length <= 2 ? selected.join(', ') : `${selected.length} routes selected`)
+        : 'Select routes';
+      routeList.querySelectorAll('.route-option').forEach((option) => {
+        option.classList.toggle('selected', option.querySelector('input').checked);
       });
     };
+    const routeSelect = content.querySelector('#n-route-select');
+    const routeMenu = content.querySelector('#n-route-menu');
+    const closeRouteMenu = () => {
+      routeMenu.classList.add('hidden');
+      routeSelect.classList.remove('open');
+    };
+    content.querySelector('#n-route-trigger').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = routeMenu.classList.contains('hidden');
+      routeMenu.classList.toggle('hidden', !willOpen);
+      routeSelect.classList.toggle('open', willOpen);
+    });
+    content.querySelector('#n-route-clear').addEventListener('click', (e) => {
+      e.preventDefault();
+      routeList.querySelectorAll('input').forEach((cb) => { cb.checked = false; });
+      updateRouteCount();
+    });
+    content.addEventListener('click', (e) => {
+      if (!routeSelect.contains(e.target)) closeRouteMenu();
+    });
     routeList.querySelectorAll('input').forEach((cb) => cb.addEventListener('change', updateRouteCount));
     content.querySelector('#n-scope').addEventListener('change', (e) => {
-      content.querySelector('#n-route-panel').classList.toggle('hidden', e.target.value !== 'route');
+      const showRoutes = e.target.value === 'route';
+      content.querySelector('#n-route-panel').classList.toggle('hidden', !showRoutes);
+      if (!showRoutes) closeRouteMenu();
       updateRouteCount();
     });
     content.querySelector('#n-refresh').addEventListener('click', () => loadNotifPreview(content));
@@ -789,9 +1049,14 @@
   async function renderLog(content) {
     content.innerHTML = `<div class="card">
       <div class="toolbar"><select id="l-status"><option value="">All Status</option>${options(['Sent', 'Failed', 'Pending'], '')}</select>
+        <button class="btn secondary sm" id="l-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
         <button class="btn secondary" id="l-export">${Icons.svg('download', 16)} Export</button></div>
       <div id="l-grid">${spinner()}</div></div>`;
     content.querySelector('#l-status').addEventListener('change', () => loadLog(content));
+    content.querySelector('#l-clear').addEventListener('click', () => {
+      content.querySelector('#l-status').value = '';
+      loadLog(content);
+    });
     content.querySelector('#l-export').addEventListener('click', () => API.download('/reports/whatsapp/export', 'whatsapp-delivery.xlsx').catch((e) => toast(e.message, 'error')));
     await loadLog(content);
   }
@@ -867,7 +1132,6 @@
     class: { label: 'Class', placeholder: 'e.g. 10' },
     section: { label: 'Section', placeholder: 'e.g. A' },
     category: { label: 'Category of Drop', placeholder: 'e.g. Robotics Club' },
-    route: { label: 'Current Route Number', placeholder: 'e.g. R10' },
   };
 
   async function settings(c) {
