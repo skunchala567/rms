@@ -235,7 +235,7 @@ function validateStudent(body, { partial = false } = {}) {
   }
   if (body.route_number !== undefined) {
     const route = clean(body.route_number);
-    const err = validateCode(route, 'Current Route Number');
+    const err = validateCode(route, 'Primary Route Number');
     if (err) errors.push(err);
     else data.route_number = route || null;
   }

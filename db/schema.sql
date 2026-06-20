@@ -65,10 +65,12 @@ CREATE TABLE IF NOT EXISTS students (
   parent_name   VARCHAR(150),
   parent_mobile VARCHAR(30),
   route_number  VARCHAR(50),
+  temporary_route_number VARCHAR(50),
   status        ENUM('Active', 'Inactive') NOT NULL DEFAULT 'Active',
   created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_students_route (route_number),
+  INDEX idx_students_temporary_route (temporary_route_number),
   INDEX idx_students_class (class),
   INDEX idx_students_category (category)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

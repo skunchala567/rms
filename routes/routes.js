@@ -167,6 +167,10 @@ router.post('/assign', requirePageAccess('route-assignment'), async (req, res, n
           SET route_number = ?, bus_id = ?, assigned_by = ?
           WHERE trip_date = ? AND student_id = ?
         `, [route, bus ? bus.id : null, req.user.id, date, id]);
+        await t.run(
+          'UPDATE students SET temporary_route_number = ?, updated_at = NOW() WHERE id = ?',
+          [route, id]
+        );
       }
     });
 

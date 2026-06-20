@@ -24,6 +24,12 @@
     const listId = `route-list-${Math.random().toString(36).slice(2, 9)}`;
     return `<input name="${esc(name)}" value="${esc(value || '')}" list="${esc(listId)}" placeholder="${esc(placeholder)}" autocomplete="off">${dataList(listId, routes)}`;
   }
+  function todayRoute(student) {
+    return student.temporary_route_number || student.route_number || '';
+  }
+  function actualRoute(student) {
+    return student.actual_route_number || student.primary_route_number || (!student.temporary_route_number ? student.route_number : '') || '';
+  }
   function downloadCsv(filename, headers, rows) {
     const csvCell = (value) => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
     const csv = [headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n');
@@ -79,7 +85,14 @@
           ${quickAction('trips', 'clock', 'Allocate transport')}
         </div>
       </div>
-      <div class="card"><h2>Route Wise Student Summary</h2><div id="dashboard-route-summary">${spinner()}</div></div>`;
+      <div class="card">
+        <div class="section-head">
+          <h2>Route Wise Student Summary</h2>
+          <button class="btn secondary" id="btn-export-dashboard-route-summary">${Icons.svg('download', 16)} Export</button>
+        </div>
+        <div id="dashboard-route-summary">${spinner()}</div>
+      </div>`;
+    c.querySelector('#btn-export-dashboard-route-summary').addEventListener('click', exportDashboardRouteSummary);
     await renderRouteStudentSummary(c.querySelector('#dashboard-route-summary'));
   }
   function statCard(label, value, icon, cls) {
@@ -90,6 +103,48 @@
   }
   function quickAction(href, icon, label) {
     return `<a class="quick-action" href="#/${href}"><span class="qa-ic">${Icons.svg(icon, 22)}</span>${esc(label)}</a>`;
+  }
+  async function exportDashboardRouteSummary() {
+    try {
+      const students = [];
+      let page = 1;
+      let totalPages = 1;
+      do {
+        const params = new URLSearchParams({
+          page: String(page), pageSize: '500', status: 'Active',
+          sort: 'route_number', dir: 'asc',
+        });
+        const res = await API.get(`/students?${params}`);
+        students.push(...(res.data || []));
+        totalPages = Number(res.totalPages) || 1;
+        page += 1;
+      } while (page <= totalPages);
+
+      if (!students.length) { toast('No active students to export.', 'warning'); return; }
+
+      const filters = await API.get('/students/filters');
+      const categories = uniqueValues([...(filters.categories || []), ...students.map((s) => s.category || 'Uncategorized')]);
+      const routeMap = new Map();
+      students.forEach((student) => {
+        const route = String(student.route_number || 'Unassigned');
+        const category = String(student.category || 'Uncategorized');
+        if (!routeMap.has(route)) {
+          routeMap.set(route, { route, total: 0, categories: Object.fromEntries(categories.map((c) => [c, 0])) });
+        }
+        const row = routeMap.get(route);
+        if (row.categories[category] == null) row.categories[category] = 0;
+        row.categories[category] += 1;
+        row.total += 1;
+      });
+      const rows = [...routeMap.values()].sort((a, b) => {
+        if (a.route === 'Unassigned') return 1;
+        if (b.route === 'Unassigned') return -1;
+        return a.route.localeCompare(b.route, undefined, { numeric: true, sensitivity: 'base' });
+      });
+      const bodyRows = rows.map((row) => [row.route, ...categories.map((category) => row.categories[category] || 0), row.total]);
+      const totalRow = ['Total', ...categories.map((category) => students.filter((student) => String(student.category || 'Uncategorized') === category).length), students.length];
+      downloadCsv('dashboard-route-wise-student-summary.csv', ['Route', ...categories, 'Total'], [...bodyRows, totalRow]);
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   // ============================ STUDENTS ============================
@@ -192,6 +247,7 @@
           <th data-sort="section">Section${sortIcon('section')}</th>
           <th data-sort="category">Category${sortIcon('category')}</th>
           <th data-sort="route_number">Route No${sortIcon('route_number')}</th>
+          <th class="nosort">Temporary Route</th>
           <th class="nosort">Assigned Bus</th>
           <th data-sort="status">Status${sortIcon('status')}</th>
           <th class="nosort">Actions</th>
@@ -229,6 +285,7 @@
         <td>${esc(s.section || '-')}</td>
         <td>${esc(s.category || '-')}</td>
         <td>${s.route_number ? badge(s.route_number, 'blue') : '<span class="muted">Unassigned</span>'}</td>
+        <td>${s.temporary_route_number ? badge(s.temporary_route_number, 'amber') : '<span class="muted">-</span>'}</td>
         <td>${esc(s.assigned_bus || '-')}</td>
         <td>${statusBadge(s.status)}</td>
         <td><div class="row-actions">
@@ -279,7 +336,7 @@
           ${field('Category of Drop', `<select name="category" required><option value="">-- Select --</option>${options(categoryOptions, s.category)}</select>`, true)}
           ${field('Parent Name', `<input name="parent_name" value="${esc(s.parent_name || '')}" minlength="2" maxlength="150" pattern="[A-Za-z .'-]*[A-Za-z][A-Za-z .'-]*" title="Use letters, spaces, dot, apostrophe, or hyphen." required>`, true)}
           ${field('Parent Mobile Number', `<input name="parent_mobile" type="tel" inputmode="numeric" value="${esc(s.parent_mobile || '')}" pattern="(?:\\+?91|0)?[6-9][0-9]{9}" title="Enter a valid 10-digit Indian mobile number." required>`, true)}
-          ${field('Current Route Number', `<select name="route_number"><option value="">Awaiting Route Assignment</option>${options(routeOptions, s.route_number)}</select>`)}
+          ${field('Primary Route Number', `<select name="route_number"><option value="">Awaiting Route Assignment</option>${options(routeOptions, s.route_number)}</select>`)}
           ${field('Status', `<select name="status" required>${options(['Active', 'Inactive'], s.status || 'Active')}</select>`, true)}
         </div>
       </form>`,
@@ -421,10 +478,10 @@
     c.querySelector('#trip-date').textContent = `(${res.date}) — ${res.count} assigned`;
     if (!res.data.length) { box.innerHTML = '<div class="empty">No students assigned for today yet.</div>'; return; }
     box.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>Student ID</th><th>Name</th><th>Class</th><th>Category</th><th>Route</th><th>Bus</th><th>Added Date & Time</th><th>Action</th></tr></thead>
+      <thead><tr><th>Student ID</th><th>Name</th><th>Class</th><th>Category</th><th>Today's Route</th><th>Bus</th><th>Added Date & Time</th><th>Action</th></tr></thead>
       <tbody>${res.data.map((t) => `<tr>
         <td>${esc(t.student_code)}</td><td>${esc(t.name)}</td><td>${esc(t.class || '-')}${t.section ? '-' + esc(t.section) : ''}</td>
-        <td>${esc(t.category || '-')}</td><td>${t.route_number ? badge(t.route_number, 'blue') : '<span class="muted">-</span>'}</td>
+        <td>${esc(t.category || '-')}</td><td>${todayRoute(t) ? badge(todayRoute(t), 'amber') : '<span class="muted">-</span>'}</td>
         <td>${esc(t.bus_number || t.route_bus_number || '-')}</td>
         <td>${fmtDateTime(t.created_at)}</td>
         <td><button class="icon-btn danger" data-rm="${t.trip_id}">Remove</button></td></tr>`).join('')}
@@ -439,13 +496,13 @@
       const res = await API.get('/trips/today');
       if (!res.data.length) { toast('No students assigned for today yet.', 'warning'); return; }
       downloadCsv(`todays-trip-list-${res.date}.csv`, [
-        'Student ID', 'Name', 'Class', 'Category', 'Route', 'Bus', 'Added Date & Time',
+        'Student ID', 'Name', 'Class', 'Category', "Today's Route", 'Bus', 'Added Date & Time',
       ], res.data.map((t) => [
         t.student_code,
         t.name,
         `${t.class || '-'}${t.section ? '-' + t.section : ''}`,
         t.category || '-',
-        t.route_number || '-',
+        todayRoute(t) || '-',
         t.bus_number || t.route_bus_number || '-',
         fmtDateTime(t.created_at),
       ]));
@@ -595,9 +652,15 @@
     const incharge = API.canAccess('buses');
     c.innerHTML = `
       <div class="section-head"><h2>Bus Management</h2>
-        ${incharge ? `<button class="btn" id="btn-add-bus">${Icons.svg('plus', 16)} Add Bus</button>` : ''}</div>
+        ${incharge ? `<div class="btn-row">
+          <button class="btn secondary" id="btn-bulk-bus">${Icons.svg('upload', 16)} Bulk Upload</button>
+          <button class="btn" id="btn-add-bus">${Icons.svg('plus', 16)} Add Bus</button>
+        </div>` : ''}</div>
       <div id="bus-grid">${spinner()}</div>`;
-    if (incharge) c.querySelector('#btn-add-bus').addEventListener('click', () => busForm(c));
+    if (incharge) {
+      c.querySelector('#btn-add-bus').addEventListener('click', () => busForm(c));
+      c.querySelector('#btn-bulk-bus').addEventListener('click', () => bulkUploadBuses(c));
+    }
     await loadBuses(c);
   }
   async function loadBuses(c) {
@@ -626,7 +689,7 @@
     modal({
       title: editing ? 'Edit Bus' : 'Add Bus', size: 'lg',
       body: `<form id="bus-form"><div class="form-grid">
-        ${field('Bus Number', `<input name="bus_number" value="${esc(b.bus_number || '')}" required>`, true)}
+        ${field('Bus Number', `<input name="bus_number" value="${esc(b.bus_number || '')}" maxlength="50" pattern="[A-Za-z0-9]+" title="Use only letters and numbers. No spaces or special characters." required>`, true)}
         ${field('Route Number', `<input name="route_number" value="${esc(b.route_number || '')}" required>`, true)}
         ${field('Seating Capacity', `<input type="number" min="0" name="seating_capacity" value="${b.seating_capacity != null ? b.seating_capacity : ''}">`)}
         ${field('GPS Tracking Link', `<input name="gps_link" value="${esc(b.gps_link || '')}" placeholder="https://...">`)}
@@ -637,7 +700,9 @@
       footer: `<button class="btn secondary" data-close>Cancel</button><button class="btn" id="save-bus">${editing ? 'Update' : 'Save'}</button>`,
       onMount: (el, close) => {
         el.querySelector('#save-bus').addEventListener('click', async () => {
-          const data = Object.fromEntries(new FormData(el.querySelector('#bus-form')).entries());
+          const form = el.querySelector('#bus-form');
+          if (!form.reportValidity()) return;
+          const data = Object.fromEntries(new FormData(form).entries());
           const btn = el.querySelector('#save-bus'); btn.disabled = true;
           try {
             if (editing) await API.put(`/buses/${b.id}`, data); else await API.post('/buses', data);
@@ -646,6 +711,69 @@
         });
       },
     });
+  }
+  function bulkUploadBuses(c) {
+    modal({
+      title: 'Bulk Upload Buses',
+      size: 'full',
+      body: `
+        <div class="alert info">Upload an <b>Excel (.xlsx)</b> or <b>CSV</b> with columns:
+          <b>Bus Number, Route Number, Seating Capacity, GPS Tracking Link, Driver Name, Driver Mobile, Status</b>.
+          Bus Number must be unique and can use only letters and numbers.
+          <a href="#" id="dl-bus-template">Download template</a></div>
+        <div class="field"><input type="file" id="bus-bulk-file" accept=".xlsx,.xls,.csv"></div>
+        <div id="bus-bulk-result"></div>`,
+      footer: `<button class="btn secondary" data-close>Close</button>
+               <button class="btn" id="btn-validate-bus" disabled>Validate</button>
+               <button class="btn success" id="btn-import-bus" disabled>Import</button>`,
+      onMount: (el, close) => {
+        let file = null;
+        el.querySelector('#dl-bus-template').addEventListener('click', (e) => {
+          e.preventDefault();
+          const csv = 'Bus Number,Route Number,Seating Capacity,GPS Tracking Link,Driver Name,Driver Mobile,Status\nBUS101,R10,45,https://example.com/track/BUS101,Ravi Kumar,9876543210,Active\n';
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+          a.download = 'bus-upload-template.csv'; a.click();
+          URL.revokeObjectURL(a.href);
+        });
+        el.querySelector('#bus-bulk-file').addEventListener('change', (e) => {
+          file = e.target.files[0];
+          el.querySelector('#btn-validate-bus').disabled = !file;
+          el.querySelector('#btn-import-bus').disabled = true;
+          el.querySelector('#bus-bulk-result').innerHTML = '';
+        });
+        el.querySelector('#btn-validate-bus').addEventListener('click', async () => {
+          if (!file) return;
+          const fd = new FormData(); fd.append('file', file);
+          el.querySelector('#bus-bulk-result').innerHTML = spinner();
+          try {
+            const r = await API.postForm('/buses/bulk-upload/validate', fd);
+            renderBusBulkResult(el, r);
+            el.querySelector('#btn-import-bus').disabled = r.validCount === 0;
+          } catch (e) { el.querySelector('#bus-bulk-result').innerHTML = `<div class="alert error">${esc(e.message)}</div>`; }
+        });
+        el.querySelector('#btn-import-bus').addEventListener('click', async () => {
+          if (!file) return;
+          const fd = new FormData(); fd.append('file', file);
+          const btn = el.querySelector('#btn-import-bus'); btn.disabled = true;
+          try {
+            const r = await API.postForm('/buses/bulk-upload/import', fd);
+            toast(`Imported ${r.imported} bus(es). Skipped ${r.skipped}.`, 'success');
+            close(); loadBuses(c);
+          } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+        });
+      },
+    });
+    function renderBusBulkResult(el, r) {
+      let html = `<div class="alert ${r.errorCount ? 'warn' : 'info'}">
+        ${r.validCount} valid row(s), ${r.errorCount} with errors out of ${r.totalRows}.</div>`;
+      if (r.errors.length) {
+        html += `<div class="table-wrap"><table><thead><tr><th>Row</th><th>Bus Number</th><th>Route Number</th><th>Issues</th></tr></thead><tbody>
+          ${r.errors.map((e) => `<tr><td>${e.row}</td><td>${esc(e.bus_number || '-')}</td><td>${esc(e.route_number || '-')}</td><td>${esc(e.messages.join(', '))}</td></tr>`).join('')}
+          </tbody></table></div>`;
+      }
+      el.querySelector('#bus-bulk-result').innerHTML = html;
+    }
   }
 
   // ============================ ROUTE ASSIGNMENT ============================
@@ -664,13 +792,16 @@
         <div id="route-summary">${spinner()}</div>
       </div>
       <div class="card">
-        <div class="section-head"><h2>${incharge ? 'Manual Assignment' : 'Route Allocation (view only)'}</h2></div>
+        <div class="section-head">
+          <h2>${incharge ? 'Manual Assignment' : 'Route Allocation (view only)'}</h2>
+          ${incharge ? `<button class="btn secondary" id="btn-download-assignment">${Icons.svg('download', 16)} Download</button>` : ''}
+        </div>
         ${incharge ? `<div class="toolbar">
           <span class="input-icon">${Icons.svg('search', 16)}<input id="a-search" placeholder="Search students"></span>
           <span id="a-route-filter-wrap"></span>
           <span id="a-target-wrap"></span>
           <button class="btn secondary sm" id="a-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
-          <button class="btn" id="btn-assign-route" disabled>Assign to Route</button>
+          <button class="btn" id="btn-assign-route" disabled>Assign Temporary Route</button>
         </div>` : ''}
         <div id="assign-grid">${spinner()}</div>
       </div>`;
@@ -678,7 +809,7 @@
     await loadOccupancy(c);
     if (incharge) {
       const [todayTrips, availableRoutes] = await Promise.all([API.get('/trips/today'), API.get('/routes/list')]);
-      const tripRoutes = uniqueValues((todayTrips.data || []).map((trip) => trip.route_number));
+      const tripRoutes = uniqueValues((todayTrips.data || []).map((trip) => actualRoute(trip)));
       c.querySelector('#a-route-filter-wrap').innerHTML = `
         <div class="route-select filter-select" id="a-route-select">
           <button type="button" class="route-select-trigger" id="a-route-trigger">
@@ -700,7 +831,7 @@
             </div>
           </div>
         </div>`;
-      c.querySelector('#a-target-wrap').innerHTML = routeSearchInput('route', '', availableRoutes, 'Route to assign');
+      c.querySelector('#a-target-wrap').innerHTML = routeSearchInput('route', '', availableRoutes, "Today's temporary route");
       c.querySelector('#a-target-wrap input').id = 'a-target';
       const routeSelect = c.querySelector('#a-route-select');
       const routeMenu = c.querySelector('#a-route-menu');
@@ -763,6 +894,7 @@
         loadAssignStudents(c);
       });
       c.querySelector('#btn-assign-route').addEventListener('click', () => doAssign(c, false));
+      c.querySelector('#btn-download-assignment').addEventListener('click', () => downloadManualAssignment(c));
       await loadAssignStudents(c);
     } else {
       c.querySelector('#assign-grid').innerHTML = '<div class="alert info">You have view-only access to route allocation.</div>';
@@ -822,25 +954,27 @@
       }
 
       if (mode === 'todayRoute') {
-        const todayRoutes = uniqueValues(students.map((s) => s.route_number || 'Unassigned'));
-        const actualRoutes = uniqueValues(students.map((s) => s.actual_route_number || 'Unassigned'));
+        const todayRoutes = uniqueValues(students.map((s) => todayRoute(s) || 'Unassigned'));
+        const actualRoutes = uniqueValues(students.map((s) => actualRoute(s) || 'Unassigned'));
         const routeMap = new Map(actualRoutes.map((route) => [
           route,
           { route, total: 0, todayRoutes: Object.fromEntries(todayRoutes.map((r) => [r, 0])) },
         ]));
         students.forEach((student) => {
-          const actualRoute = String(student.actual_route_number || 'Unassigned');
-          const todayRoute = String(student.route_number || 'Unassigned');
-          if (!routeMap.has(actualRoute)) {
-            routeMap.set(actualRoute, {
-              route: actualRoute,
+          const actualRouteValue = actualRoute(student);
+          const todayRouteValue = todayRoute(student);
+          const actualRouteName = String(actualRouteValue || 'Unassigned');
+          const todayRouteName = String(todayRouteValue || 'Unassigned');
+          if (!routeMap.has(actualRouteName)) {
+            routeMap.set(actualRouteName, {
+              route: actualRouteName,
               total: 0,
               todayRoutes: Object.fromEntries(todayRoutes.map((r) => [r, 0])),
             });
           }
-          const row = routeMap.get(actualRoute);
-          if (row.todayRoutes[todayRoute] == null) row.todayRoutes[todayRoute] = 0;
-          row.todayRoutes[todayRoute] += 1;
+          const row = routeMap.get(actualRouteName);
+          if (row.todayRoutes[todayRouteName] == null) row.todayRoutes[todayRouteName] = 0;
+          row.todayRoutes[todayRouteName] += 1;
           row.total += 1;
         });
         const rows = [...routeMap.values()].sort((a, b) => {
@@ -849,13 +983,16 @@
           return a.route.localeCompare(b.route, undefined, { numeric: true, sensitivity: 'base' });
         });
         box.innerHTML = `<div class="table-wrap"><table>
-          <thead><tr><th>Actual Route</th>${todayRoutes.map((route) => `<th>${esc(route)}</th>`).join('')}<th>Total</th></tr></thead>
+          <thead>
+            <tr><th rowspan="2">Actual Route</th><th colspan="${todayRoutes.length}">Today's Route</th><th rowspan="2">Total</th></tr>
+            <tr>${todayRoutes.map((route) => `<th>${esc(route)}</th>`).join('')}</tr>
+          </thead>
           <tbody>${rows.map((row) => `<tr>
             <td>${row.route === 'Unassigned' ? '<span class="muted">Unassigned</span>' : badge(row.route, 'blue')}</td>
             ${todayRoutes.map((route) => `<td>${row.todayRoutes[route] || 0}</td>`).join('')}
             <td><b>${row.total}</b></td>
           </tr>`).join('')}</tbody>
-          <tfoot><tr><th>Total</th>${todayRoutes.map((route) => `<th>${students.filter((student) => String(student.route_number || 'Unassigned') === route).length}</th>`).join('')}<th>${students.length}</th></tr></tfoot>
+          <tfoot><tr><th>Total</th>${todayRoutes.map((route) => `<th>${students.filter((student) => String(todayRoute(student) || 'Unassigned') === route).length}</th>`).join('')}<th>${students.length}</th></tr></tfoot>
         </table></div>`;
         return;
       }
@@ -933,26 +1070,19 @@
   async function loadAssignStudents(c) {
     const grid = c.querySelector('#assign-grid');
     grid.innerHTML = spinner();
-    const routes = [...c.querySelectorAll('#a-route-list input:checked')].map((input) => input.value);
-    const search = c.querySelector('#a-search').value.trim().toLowerCase();
-    const res = await API.get('/trips/today');
-    const rows = (res.data || []).filter((s) => {
-      const matchesRoute = !routes.length || routes.includes(String(s.route_number || ''));
-      const haystack = [s.student_code, s.name, s.class, s.section, s.category, s.route_number, s.actual_route_number].join(' ').toLowerCase();
-      return matchesRoute && (!search || haystack.includes(search));
-    });
+    const { rows } = await getManualAssignmentRows(c);
     await renderRouteStudentSummary(c.querySelector('#route-summary'), rows, {
       mode: 'todayRoute',
       emptyMessage: 'No students shown in Manual Assignment.',
     });
     if (!rows.length) { grid.innerHTML = "<div class=\"empty\">No students found in today's trip list.</div>"; return; }
     grid.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th class="checkbox-cell"><input type="checkbox" id="a-all"></th><th>ID</th><th>Name</th><th>Class</th><th>Today's Route</th><th>Actual Route</th></tr></thead>
+      <thead><tr><th class="checkbox-cell"><input type="checkbox" id="a-all"></th><th>ID</th><th>Name</th><th>Class</th><th>Today's Route (Temporary)</th><th>Actual Route</th></tr></thead>
       <tbody>${rows.map((s) => `<tr>
         <td class="checkbox-cell"><input type="checkbox" class="a-check" value="${s.student_id}" ${assignState.selected.has(s.student_id) ? 'checked' : ''}></td>
         <td>${esc(s.student_code)}</td><td>${esc(s.name)}</td><td>${esc(s.class || '-')}</td>
-        <td>${s.route_number ? badge(s.route_number, 'blue') : '<span class="muted">Unassigned</span>'}</td>
-        <td>${s.actual_route_number ? badge(s.actual_route_number, 'gray') : '<span class="muted">Unassigned</span>'}</td></tr>`).join('')}
+        <td>${todayRoute(s) ? badge(todayRoute(s), 'amber') : '<span class="muted">Unassigned</span>'}</td>
+        <td>${actualRoute(s) ? badge(actualRoute(s), 'blue') : '<span class="muted">Unassigned</span>'}</td></tr>`).join('')}
       </tbody></table></div>`;
     grid.querySelector('#a-all').addEventListener('change', (e) => {
       grid.querySelectorAll('.a-check').forEach((cb) => { cb.checked = e.target.checked; if (e.target.checked) assignState.selected.add(Number(cb.value)); else assignState.selected.delete(Number(cb.value)); });
@@ -962,6 +1092,36 @@
       if (cb.checked) assignState.selected.add(Number(cb.value)); else assignState.selected.delete(Number(cb.value)); updateAssignBtn(c);
     }));
     updateAssignBtn(c);
+  }
+  async function getManualAssignmentRows(c) {
+    const routes = [...c.querySelectorAll('#a-route-list input:checked')].map((input) => input.value);
+    const search = c.querySelector('#a-search').value.trim().toLowerCase();
+    const res = await API.get('/trips/today');
+    const rows = (res.data || []).filter((s) => {
+      const tempRoute = todayRoute(s);
+      const primaryRoute = actualRoute(s);
+      const matchesRoute = !routes.length || routes.includes(String(primaryRoute || ''));
+      const haystack = [s.student_code, s.name, s.class, s.section, s.category, tempRoute, primaryRoute].join(' ').toLowerCase();
+      return matchesRoute && (!search || haystack.includes(search));
+    });
+    return { date: res.date, rows };
+  }
+  async function downloadManualAssignment(c) {
+    try {
+      const { date, rows } = await getManualAssignmentRows(c);
+      if (!rows.length) { toast('No Manual Assignment rows to download.', 'warning'); return; }
+      downloadCsv(`manual-assignment-${date}.csv`, [
+        'Student ID', 'Name', 'Class', 'Section', 'Category', "Today's Route (Temporary)", 'Actual Route',
+      ], rows.map((s) => [
+        s.student_code,
+        s.name,
+        s.class || '-',
+        s.section || '-',
+        s.category || '-',
+        todayRoute(s) || '-',
+        actualRoute(s) || '-',
+      ]));
+    } catch (e) { toast(e.message, 'error'); }
   }
   function updateAssignBtn(c) {
     const b = c.querySelector('#btn-assign-route');
@@ -974,7 +1134,7 @@
     if (!route || !ids.length) return;
     try {
       const r = await API.post('/routes/assign', { studentIds: ids, route, force });
-      toast(`Assigned ${r.assigned} student(s) to ${route} for today's trip.`, 'success');
+      toast(`Assigned ${r.assigned} student(s) to temporary route ${route} for today.`, 'success');
       assignState.selected.clear();
       await routeAssignment(c);
     } catch (e) {
@@ -1108,9 +1268,9 @@
         <div id="n-status"></div>
         <div id="n-grid">${spinner()}</div>
       </div>`;
-    const [filters, occupancy] = await Promise.all([API.get('/students/filters'), API.get('/routes/occupancy')]);
+    const occupancy = await API.get('/routes/occupancy?scope=trip');
     const routeCounts = new Map((occupancy || []).map((route) => [String(route.route_number || ''), Number(route.occupied) || 0]));
-    const routes = uniqueValues([...(filters.routes || []), ...(occupancy || []).map((route) => route.route_number)]);
+    const routes = uniqueValues((occupancy || []).map((route) => route.route_number));
     const routeList = content.querySelector('#n-route-list');
     routeList.innerHTML = routes.map((route) => `
       <label class="route-option">
@@ -1326,7 +1486,7 @@
     content.querySelector('#exp').addEventListener('click', () => API.download('/reports/daily-route/export', 'daily-route.xlsx').catch((e) => toast(e.message, 'error')));
     const r = await API.get('/reports/daily-route');
     content.querySelector('#rt').innerHTML = reportTable(
-      [{ h: 'Student Name', k: 'student_name' }, { h: 'Student ID', k: 'student_id' }, { h: 'Route Number', k: 'route_number' }, { h: 'Bus Number', k: 'bus_number' }, { h: 'Category', k: 'category' }], r.data);
+      [{ h: 'Student Name', k: 'student_name' }, { h: 'Student ID', k: 'student_id' }, { h: "Today's Route", k: 'temporary_route_number' }, { h: 'Actual Route', k: 'actual_route_number' }, { h: 'Bus Number', k: 'bus_number' }, { h: 'Category', k: 'category' }], r.data);
   }
   async function repBus(content) {
     content.innerHTML = `<div class="card"><div class="section-head"><h2>Bus Occupancy Report</h2>
@@ -1334,7 +1494,7 @@
     content.querySelector('#exp').addEventListener('click', () => API.download('/reports/bus-occupancy/export', 'bus-occupancy.xlsx').catch((e) => toast(e.message, 'error')));
     const r = await API.get('/reports/bus-occupancy');
     content.querySelector('#rt').innerHTML = reportTable(
-      [{ h: 'Bus Number', k: 'bus_number' }, { h: 'Capacity', k: 'capacity' }, { h: 'Occupied', k: 'occupied' }, { h: 'Available', k: 'available' }], r.data);
+      [{ h: 'Bus Number', k: 'bus_number' }, { h: 'Route Number', k: 'route_number' }, { h: 'Capacity', k: 'capacity' }, { h: 'Occupied Today', k: 'occupied' }, { h: 'Available', k: 'available' }], r.data);
   }
   async function repWhatsapp(content) {
     content.innerHTML = `<div class="card"><div class="section-head"><h2>WhatsApp Delivery Report</h2>

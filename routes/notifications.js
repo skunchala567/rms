@@ -39,15 +39,22 @@ router.get('/preview', async (req, res, next) => {
       if (routes.length) {
         const placeholders = routes.map(() => '?').join(',');
         students = await db.query(
-          `SELECT * FROM students WHERE route_number IN (${placeholders}) AND status='Active' ORDER BY route_number, name`,
-          routes
+          `SELECT s.id, s.student_code, s.name, s.class, s.section, s.category, s.parent_name, s.parent_mobile,
+                  s.status, t.route_number, t.route_number AS temporary_route_number,
+                  s.route_number AS actual_route_number
+           FROM trip_assignments t
+           JOIN students s ON s.id = t.student_id
+           WHERE t.trip_date = ? AND t.route_number IN (${placeholders}) AND s.status='Active'
+           ORDER BY t.route_number, s.name`,
+          [today(), ...routes]
         );
       }
     } else {
       const date = String(req.query.date || today());
       students = await db.prepare(`
         SELECT s.id, s.student_code, s.name, s.class, s.section, s.category, s.parent_name, s.parent_mobile,
-               s.status, t.route_number
+               s.status, t.route_number, t.route_number AS temporary_route_number,
+               s.route_number AS actual_route_number
         FROM trip_assignments t JOIN students s ON s.id = t.student_id
         WHERE t.trip_date = ? ORDER BY t.route_number, s.name
       `).all(date);

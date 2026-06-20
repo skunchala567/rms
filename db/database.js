@@ -199,6 +199,13 @@ async function runMigrations() {
     }
   }
 
+  if (await tableExists('students')) {
+    if (!(await columnType('students', 'temporary_route_number'))) {
+      await pool.query('ALTER TABLE students ADD COLUMN temporary_route_number VARCHAR(50) NULL AFTER route_number');
+      await pool.query('CREATE INDEX idx_students_temporary_route ON students (temporary_route_number)');
+    }
+  }
+
   await seedRolesAndPermissions();
 }
 

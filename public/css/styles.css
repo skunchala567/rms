@@ -483,6 +483,7 @@ td b { font-weight: 600; color: var(--ch-800); }
 }
 @keyframes pop { from { transform: translateY(12px) scale(.98); opacity: 0; } to { transform: none; opacity: 1; } }
 .modal.lg { max-width: 780px; }
+.modal.full { max-width: min(1200px, calc(100vw - 40px)); }
 .modal-head { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; }
 .modal-head h3 { margin: 0; font-size: 17px; font-weight: 700; flex: 1; letter-spacing: -0.01em; }
 .modal-close { background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; color: var(--text-muted); padding: 6px; display: flex; }

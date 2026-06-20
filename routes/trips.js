@@ -17,7 +17,10 @@ router.get('/today', async (req, res, next) => {
   try {
     const date = String(req.query.date || today());
     const rows = await db.prepare(`
-      SELECT t.id AS trip_id, t.trip_date, t.route_number, t.created_at,
+      SELECT t.id AS trip_id, t.trip_date,
+             s.route_number AS route_number,
+             COALESCE(s.temporary_route_number, t.route_number) AS temporary_route_number,
+             t.created_at,
              s.id AS student_id, s.student_code, s.name, s.class, s.section, s.category, s.parent_mobile,
              s.route_number AS actual_route_number,
              b.bus_number,
@@ -56,6 +59,10 @@ router.post('/assign', async (req, res, next) => {
           student_id: s.id, trip_date: date, route_number: s.route_number || null,
           bus_id: bus ? bus.id : null, assigned_by: req.user.id,
         });
+        await t.run(
+          'UPDATE students SET temporary_route_number = ?, updated_at = NOW() WHERE id = ?',
+          [s.route_number || null, s.id]
+        );
         added += 1;
       }
     });
@@ -67,8 +74,12 @@ router.post('/assign', async (req, res, next) => {
 // DELETE /api/trips/:tripId  -> remove a student from today's trip
 router.delete('/:tripId', async (req, res, next) => {
   try {
+    const row = await db.prepare('SELECT student_id FROM trip_assignments WHERE id = ?').get(req.params.tripId);
     const info = await db.prepare('DELETE FROM trip_assignments WHERE id = ?').run(req.params.tripId);
     if (info.changes === 0) return res.status(404).json({ error: 'Trip entry not found.' });
+    if (row) {
+      await db.prepare('UPDATE students SET temporary_route_number = NULL, updated_at = NOW() WHERE id = ?').run(row.student_id);
+    }
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -77,7 +88,17 @@ router.delete('/:tripId', async (req, res, next) => {
 router.post('/clear', async (req, res, next) => {
   try {
     const date = String(req.body.date || today());
-    await db.prepare('DELETE FROM trip_assignments WHERE trip_date = ?').run(date);
+    const rows = await db.prepare('SELECT student_id FROM trip_assignments WHERE trip_date = ?').all(date);
+    await db.transaction(async (t) => {
+      if (rows.length) {
+        await t.run(
+          `UPDATE students SET temporary_route_number = NULL, updated_at = NOW()
+           WHERE id IN (${rows.map(() => '?').join(',')})`,
+          rows.map((row) => row.student_id)
+        );
+      }
+      await t.run('DELETE FROM trip_assignments WHERE trip_date = ?', [date]);
+    });
     res.json({ ok: true, date });
   } catch (err) { next(err); }
 });
