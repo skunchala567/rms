@@ -4,8 +4,6 @@ const jwt = require('jsonwebtoken');
 const db = require('../db/database');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
-const ADMIN_ROLE = 'transport_incharge';
-
 function signToken(user) {
   return jwt.sign(
     {
@@ -53,7 +51,6 @@ function authenticate(req, res, next) {
 
 function hasPageAccess(user, pageKey) {
   if (!user) return false;
-  if (user.role === ADMIN_ROLE) return true;
   return Array.isArray(user.access) && user.access.includes(pageKey);
 }
 
@@ -69,8 +66,13 @@ function authorize(...roles) {
 }
 
 function requirePageAccess(pageKey) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'Authentication required.' });
+    try {
+      req.user.access = await permissionsForRole(req.user.role);
+    } catch (err) {
+      return next(err);
+    }
     if (!hasPageAccess(req.user, pageKey)) {
       return res.status(403).json({ error: 'You do not have permission to perform this action.' });
     }

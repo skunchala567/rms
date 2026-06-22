@@ -12,8 +12,8 @@ const PAGE_OPTIONS = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'students', label: 'Students' },
   { key: 'trips', label: 'Allocate transport' },
-  { key: 'buses', label: 'Buses' },
   { key: 'route-assignment', label: 'Route Assignment' },
+  { key: 'buses', label: 'Buses' },
   { key: 'route-replacement', label: 'Route Replacement' },
   { key: 'notifications', label: 'Notifications' },
   { key: 'reports', label: 'Reports' },
@@ -166,8 +166,6 @@ router.put('/roles/:roleKey', requirePageAccess('settings'), async (req, res, ne
     const permissions = validPages(req.body.permissions);
     if (!roleName) return res.status(400).json({ error: 'Role name is required.' });
     if (!['Active', 'Inactive'].includes(status)) return res.status(400).json({ error: 'Status must be Active or Inactive.' });
-    if (roleKey === 'transport_incharge' && !permissions.includes('settings')) permissions.push('settings');
-
     await db.transaction(async (t) => {
       await t.run('UPDATE roles SET role_name = ?, status = ?, updated_at = NOW() WHERE role_key = ?', [roleName, status, roleKey]);
       await t.run('DELETE FROM role_permissions WHERE role_key = ?', [roleKey]);

@@ -7,8 +7,8 @@
     { path: 'dashboard', label: 'Dashboard', icon: 'dashboard', page: 'dashboard' },
     { path: 'students', label: 'Students', icon: 'students', page: 'students' },
     { path: 'trips', label: 'Allocate transport', icon: 'clock', page: 'trips' },
-    { path: 'buses', label: 'Buses', icon: 'bus', page: 'buses' },
     { path: 'route-assignment', label: 'Route Assignment', icon: 'route', page: 'routeAssignment' },
+    { path: 'buses', label: 'Buses', icon: 'bus', page: 'buses' },
     { path: 'route-replacement', label: 'Route Replacement', icon: 'replace', page: 'routeReplacement' },
     { path: 'notifications', label: 'Notifications', icon: 'message', page: 'notifications' },
     { path: 'reports', label: 'Reports', icon: 'reports', page: 'reports' },
@@ -25,7 +25,7 @@
 
   function navItemsFor(user) {
     const access = Array.isArray(user.access) ? user.access : [];
-    return NAV.filter((n) => user.role === 'transport_incharge' || access.includes(n.path));
+    return NAV.filter((n) => access.includes(n.path));
   }
 
   function renderLogin() {
@@ -66,13 +66,16 @@
     const user = API.getUser();
     const items = navItemsFor(user);
     const roleName = user.roleName || user.role;
+    const navHtml = items.length
+      ? items.map((n) => `<div class="nav-item" data-path="${n.path}">${Icons.svg(n.icon, 19)}${esc(n.label)}</div>`).join('')
+      : '<div class="nav-item muted">No page access</div>';
     appEl.innerHTML = `
       <div class="app-shell">
         <aside class="sidebar" id="sidebar">
           <div class="brand">${Icons.logoMark(36)}<span class="brand-text">Stay Back<small>Route Management</small></span></div>
           <nav>
             <div class="nav-section">Main</div>
-            ${items.map((n) => `<div class="nav-item" data-path="${n.path}">${Icons.svg(n.icon, 19)}${esc(n.label)}</div>`).join('')}
+            ${navHtml}
           </nav>
           <div class="foot">${Icons.svg('shield', 15)} v1.0 - ${esc(roleName)}</div>
         </aside>
@@ -171,7 +174,14 @@
 
     if (!nav) {
       if (path === 'login') { location.hash = '#/dashboard'; return; }
-      location.hash = '#/dashboard';
+      const first = navItemsFor(user)[0];
+      if (first) location.hash = `#/${first.path}`;
+      else {
+        document.querySelectorAll('.nav-item').forEach((el) => el.classList.remove('active'));
+        document.getElementById('page-title').textContent = 'No Access';
+        const content = document.getElementById('content');
+        content.innerHTML = '<div class="alert error">No pages are assigned to your role. Contact an administrator.</div>';
+      }
       return;
     }
 
@@ -180,6 +190,7 @@
 
     const content = document.getElementById('content');
     content.innerHTML = '';
+    content.className = 'content';
     try {
       await Pages[nav.page](content, query);
     } catch (e) {

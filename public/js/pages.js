@@ -64,36 +64,29 @@
   async function dashboard(c) {
     c.innerHTML = spinner();
     const s = await API.get('/dashboard/summary');
-    const canSend = API.canAccess('notifications');
     c.innerHTML = `
       <div class="section-head"><div><h2>Welcome back</h2><div class="sub">Here's today's stay-back transport overview.</div></div></div>
       <div class="cards">
         ${statCard('Total Students', s.totalStudents, 'students', '')}
-        ${statCard('Awaiting Route Assignment', s.awaitingRoute, 'alert', 'amber')}
+        ${statCard('Occupied Buses Today', s.occupiedBusesToday, 'bus', 'amber')}
         ${statCard('Allocated Transport Today', s.assignedFor5pm, 'checkCircle', 'green')}
         ${statCard('Total Active Buses', s.activeBuses, 'bus', 'teal')}
         ${statCard('WhatsApp Sent Today', s.whatsappToday, 'message', 'purple')}
       </div>
       <div class="card">
-        <h2>Quick Actions</h2>
-        <div class="quick-actions">
-          ${quickAction('students?add=1', 'plus', 'Add Student')}
-          ${quickAction('students?bulk=1', 'upload', 'Bulk Upload')}
-          ${canSend ? quickAction('buses', 'bus', 'Manage Buses') : ''}
-          ${quickAction('route-assignment', 'route', 'Assign Routes')}
-          ${canSend ? quickAction('notifications', 'send', 'Send Notifications') : ''}
-          ${quickAction('trips', 'clock', 'Allocate transport')}
-        </div>
-      </div>
-      <div class="card">
         <div class="section-head">
           <h2>Route Wise Student Summary</h2>
-          <button class="btn secondary" id="btn-export-dashboard-route-summary">${Icons.svg('download', 16)} Export</button>
+          <div class="btn-row">
+            <button class="btn secondary" id="btn-print-dashboard-route-summary">${Icons.svg('reports', 16)} Print / PDF</button>
+            <button class="btn secondary" id="btn-export-dashboard-route-summary">${Icons.svg('download', 16)} Export</button>
+          </div>
         </div>
         <div id="dashboard-route-summary">${spinner()}</div>
       </div>`;
+    c.querySelector('#btn-print-dashboard-route-summary').addEventListener('click', () => printDashboardRouteSummary(c));
     c.querySelector('#btn-export-dashboard-route-summary').addEventListener('click', exportDashboardRouteSummary);
-    await renderRouteStudentSummary(c.querySelector('#dashboard-route-summary'));
+    const trips = await API.get('/trips/today');
+    await renderRouteStudentSummary(c.querySelector('#dashboard-route-summary'), trips.data || [], { routeSource: 'today' });
   }
   function statCard(label, value, icon, cls) {
     return `<div class="stat-card ${cls}">
@@ -104,29 +97,23 @@
   function quickAction(href, icon, label) {
     return `<a class="quick-action" href="#/${href}"><span class="qa-ic">${Icons.svg(icon, 22)}</span>${esc(label)}</a>`;
   }
+  function printDashboardRouteSummary(c) {
+    const table = c.querySelector('#dashboard-route-summary table');
+    if (!table) { toast('No route summary available to print.', 'warning'); return; }
+    printHtml('Dashboard Route Wise Student Summary', table.outerHTML);
+  }
   async function exportDashboardRouteSummary() {
     try {
-      const students = [];
-      let page = 1;
-      let totalPages = 1;
-      do {
-        const params = new URLSearchParams({
-          page: String(page), pageSize: '500', status: 'Active',
-          sort: 'route_number', dir: 'asc',
-        });
-        const res = await API.get(`/students?${params}`);
-        students.push(...(res.data || []));
-        totalPages = Number(res.totalPages) || 1;
-        page += 1;
-      } while (page <= totalPages);
+      const res = await API.get('/trips/today');
+      const students = res.data || [];
 
-      if (!students.length) { toast('No active students to export.', 'warning'); return; }
+      if (!students.length) { toast('No students allocated today to export.', 'warning'); return; }
 
       const filters = await API.get('/students/filters');
       const categories = uniqueValues([...(filters.categories || []), ...students.map((s) => s.category || 'Uncategorized')]);
       const routeMap = new Map();
       students.forEach((student) => {
-        const route = String(student.route_number || 'Unassigned');
+        const route = String(todayRoute(student) || 'Unassigned');
         const category = String(student.category || 'Uncategorized');
         if (!routeMap.has(route)) {
           routeMap.set(route, { route, total: 0, categories: Object.fromEntries(categories.map((c) => [c, 0])) });
@@ -648,7 +635,9 @@
   }
 
   // ============================ BUSES ============================
+  const busState = { page: 1, pageSize: 20, filters: {} };
   async function buses(c) {
+    c.classList.add('content-full');
     const incharge = API.canAccess('buses');
     c.innerHTML = `
       <div class="section-head"><h2>Bus Management</h2>
@@ -666,11 +655,57 @@
   async function loadBuses(c) {
     const grid = c.querySelector('#bus-grid');
     const list = await API.get('/buses');
-    const incharge = API.canAccess('buses');
     if (!list.length) { grid.innerHTML = '<div class="empty">No buses configured yet.</div>'; return; }
-    grid.innerHTML = `<div class="table-wrap"><table>
+    renderBuses(c, list);
+  }
+  function renderBuses(c, list) {
+    const grid = c.querySelector('#bus-grid');
+    if (!grid) return;
+    const incharge = API.canAccess('buses');
+    const filters = busState.filters || {};
+    const routeOptions = uniqueValues(list.map((b) => b.route_number));
+    const statusOptions = uniqueValues(list.map((b) => b.status || 'Active'));
+    const search = String(filters.search || '').trim().toLowerCase();
+    const filteredList = list.filter((b) => {
+      const route = String(b.route_number || '');
+      const status = String(b.status || 'Active');
+      const capacity = Number(b.seating_capacity) || 0;
+      const occupied = Number(b.occupied) || 0;
+      const available = Number(b.available) || Math.max(capacity - occupied, 0);
+      const pct = capacity ? (occupied / capacity) * 100 : 0;
+      const matchesSearch = !search || [b.bus_number, route, status, b.driver_name, b.driver_mobile].some((v) => String(v || '').toLowerCase().includes(search));
+      const matchesRoute = !filters.route || route === filters.route;
+      const matchesStatus = !filters.status || status === filters.status;
+      let matchesOccupancy = true;
+      if (filters.occupancy === 'available') matchesOccupancy = available > 0;
+      if (filters.occupancy === 'full') matchesOccupancy = capacity > 0 && available <= 0;
+      if (filters.occupancy === 'empty') matchesOccupancy = occupied <= 0;
+      if (filters.occupancy === 'occupied') matchesOccupancy = capacity > 0 && pct >= 1;
+      return matchesSearch && matchesRoute && matchesStatus && matchesOccupancy;
+    });
+    const totalPages = Math.max(1, Math.ceil(filteredList.length / busState.pageSize));
+    if (busState.page > totalPages) busState.page = totalPages;
+    if (busState.page < 1) busState.page = 1;
+    const start = (busState.page - 1) * busState.pageSize;
+    const pageRows = filteredList.slice(start, start + busState.pageSize);
+    grid.innerHTML = `
+      <div class="toolbar">
+        <span class="input-icon">${Icons.svg('search', 16)}<input id="bus-search" placeholder="Search bus / route / driver" value="${esc(filters.search || '')}"></span>
+        <select id="bus-route"><option value="">All Routes</option>${options(routeOptions, filters.route || '')}</select>
+        <select id="bus-status"><option value="">All Status</option>${options(statusOptions, filters.status || '')}</select>
+        <select id="bus-level">
+          <option value="" ${!filters.occupancy ? 'selected' : ''}>All Occupancy</option>
+          <option value="available" ${filters.occupancy === 'available' ? 'selected' : ''}>Available Seats</option>
+          <option value="occupied" ${filters.occupancy === 'occupied' ? 'selected' : ''}>Occupied</option>
+          <option value="full" ${filters.occupancy === 'full' ? 'selected' : ''}>Full Buses</option>
+          <option value="empty" ${filters.occupancy === 'empty' ? 'selected' : ''}>Empty Buses</option>
+        </select>
+        <button class="btn secondary sm" id="bus-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
+        <span class="muted">${filteredList.length} of ${list.length} bus(es)</span>
+      </div>
+      <div id="bus-table">${filteredList.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Bus No</th><th>Route No</th><th>Capacity</th><th>Occupied</th><th>Available</th><th>Occupancy</th><th>Driver</th><th>Tracking</th><th>Status</th>${incharge ? '<th>Actions</th>' : ''}</tr></thead>
-      <tbody>${list.map((b) => `<tr>
+      <tbody>${pageRows.map((b) => `<tr>
         <td><b>${esc(b.bus_number)}</b></td><td>${badge(b.route_number, 'blue')}</td>
         <td>${b.seating_capacity}</td><td>${b.occupied}</td><td>${b.available}</td>
         <td>${occupancyBar(b.occupied, b.seating_capacity)}</td>
@@ -679,7 +714,32 @@
         <td>${statusBadge(b.status)}</td>
         ${incharge ? `<td><div class="row-actions">
           <button class="icon-btn" data-edit='${esc(JSON.stringify(b))}' title="Edit">${Icons.svg('edit', 15)}</button></div></td>` : ''}
-      </tr>`).join('')}</tbody></table></div>`;
+      </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No buses match the selected filters.</div>'}</div>
+      <div class="pagination" id="bus-pager">
+        <span class="muted">${filteredList.length} buses - page ${busState.page} of ${totalPages}</span>
+        <button class="btn secondary sm" id="bus-prev" ${busState.page <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+        <button class="btn secondary sm" id="bus-next" ${busState.page >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+      </div>`;
+    const apply = () => {
+      busState.filters = {
+        search: grid.querySelector('#bus-search').value.trim(),
+        route: grid.querySelector('#bus-route').value,
+        status: grid.querySelector('#bus-status').value,
+        occupancy: grid.querySelector('#bus-level').value,
+      };
+      busState.page = 1;
+      renderBuses(c, list);
+    };
+    let t;
+    grid.querySelector('#bus-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 250); });
+    ['#bus-route', '#bus-status', '#bus-level'].forEach((id) => grid.querySelector(id).addEventListener('change', apply));
+    grid.querySelector('#bus-clear').addEventListener('click', () => {
+      busState.filters = {};
+      busState.page = 1;
+      renderBuses(c, list);
+    });
+    grid.querySelector('#bus-prev').addEventListener('click', () => { busState.page--; renderBuses(c, list); });
+    grid.querySelector('#bus-next').addEventListener('click', () => { busState.page++; renderBuses(c, list); });
     if (incharge) {
       grid.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => busForm(c, JSON.parse(b.dataset.edit))));
     }
@@ -777,7 +837,7 @@
   }
 
   // ============================ ROUTE ASSIGNMENT ============================
-  const assignState = { selected: new Set(), filters: {} };
+  const assignState = { selected: new Set(), filters: {}, occFilters: {}, occPage: 1, occPageSize: 20 };
   async function routeAssignment(c) {
     assignState.selected.clear();
     const incharge = API.canAccess('route-assignment');
@@ -907,16 +967,87 @@
   async function loadOccupancy(c) {
     const rows = (await API.get('/routes/occupancy?scope=trip')).filter((r) => r.bus_id);
     const box = c.querySelector('#occ');
-    const canEdit = API.canAccess('route-assignment');
     if (!rows.length) { box.innerHTML = '<div class="empty">No buses configured yet.</div>'; return; }
-    box.innerHTML = `<div class="table-wrap"><table>
+    renderOccupancy(c, rows);
+  }
+  function renderOccupancy(c, rows) {
+    const box = c.querySelector('#occ');
+    if (!box) return;
+    const canEdit = API.canAccess('route-assignment');
+    const filters = assignState.occFilters || {};
+    const routeOptions = uniqueValues(rows.map((r) => r.route_number));
+    const statusOptions = uniqueValues(rows.map((r) => r.status || 'Active'));
+    const search = String(filters.search || '').trim().toLowerCase();
+    const filteredRows = rows.filter((r) => {
+      const route = String(r.route_number || '');
+      const status = String(r.status || 'Active');
+      const capacity = Number(r.capacity) || 0;
+      const occupied = Number(r.occupied) || 0;
+      const available = Number(r.available) || Math.max(capacity - occupied, 0);
+      const pct = capacity ? (occupied / capacity) * 100 : 0;
+      const matchesSearch = !search || [r.bus_number, route, status].some((v) => String(v || '').toLowerCase().includes(search));
+      const matchesRoute = !filters.route || route === filters.route;
+      const matchesStatus = !filters.status || status === filters.status;
+      let matchesOccupancy = true;
+      if (filters.occupancy === 'available') matchesOccupancy = available > 0;
+      if (filters.occupancy === 'full') matchesOccupancy = capacity > 0 && available <= 0;
+      if (filters.occupancy === 'empty') matchesOccupancy = occupied <= 0;
+      if (filters.occupancy === 'occupied') matchesOccupancy = capacity > 0 && pct >= 1;
+      return matchesSearch && matchesRoute && matchesStatus && matchesOccupancy;
+    });
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / assignState.occPageSize));
+    if (assignState.occPage > totalPages) assignState.occPage = totalPages;
+    if (assignState.occPage < 1) assignState.occPage = 1;
+    const start = (assignState.occPage - 1) * assignState.occPageSize;
+    const pageRows = filteredRows.slice(start, start + assignState.occPageSize);
+    box.innerHTML = `
+      <div class="toolbar">
+        <span class="input-icon">${Icons.svg('search', 16)}<input id="occ-search" placeholder="Search bus / route" value="${esc(filters.search || '')}"></span>
+        <select id="occ-route"><option value="">All Routes</option>${options(routeOptions, filters.route || '')}</select>
+        <select id="occ-status"><option value="">All Status</option>${options(statusOptions, filters.status || '')}</select>
+        <select id="occ-level">
+          <option value="" ${!filters.occupancy ? 'selected' : ''}>All Occupancy</option>
+          <option value="available" ${filters.occupancy === 'available' ? 'selected' : ''}>Available Seats</option>
+          <option value="occupied" ${filters.occupancy === 'occupied' ? 'selected' : ''}>Occupied</option>
+          <option value="full" ${filters.occupancy === 'full' ? 'selected' : ''}>Full Buses</option>
+          <option value="empty" ${filters.occupancy === 'empty' ? 'selected' : ''}>Empty Buses</option>
+        </select>
+        <button class="btn secondary sm" id="occ-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
+        <span class="muted">${filteredRows.length} of ${rows.length} bus(es)</span>
+      </div>
+      <div id="occ-grid">${filteredRows.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Bus</th><th>Route</th><th>Capacity</th><th>Occupied</th><th>Available</th><th>Occupancy</th><th>Status</th>${canEdit ? '<th>Actions</th>' : ''}</tr></thead>
-      <tbody>${rows.map((r) => `<tr>
+      <tbody>${pageRows.map((r) => `<tr>
         <td><b>${esc(r.bus_number || '-')}</b></td><td>${badge(r.route_number, 'blue')}</td>
         <td>${r.capacity}</td><td>${r.occupied}</td><td>${r.available}</td>
         <td>${occupancyBar(r.occupied, r.capacity)}</td><td>${statusBadge(r.status || 'Active')}</td>
         ${canEdit ? `<td><button class="icon-btn" data-bus-route='${esc(JSON.stringify(r))}' title="Edit route">${Icons.svg('edit', 15)} Edit</button></td>` : ''}</tr>`).join('')}
-      </tbody></table></div>`;
+      </tbody></table></div>` : '<div class="empty">No buses match the selected filters.</div>'}</div>
+      <div class="pagination" id="occ-pager">
+        <span class="muted">${filteredRows.length} buses - page ${assignState.occPage} of ${totalPages}</span>
+        <button class="btn secondary sm" id="occ-prev" ${assignState.occPage <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+        <button class="btn secondary sm" id="occ-next" ${assignState.occPage >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+      </div>`;
+    const apply = () => {
+      assignState.occFilters = {
+        search: box.querySelector('#occ-search').value.trim(),
+        route: box.querySelector('#occ-route').value,
+        status: box.querySelector('#occ-status').value,
+        occupancy: box.querySelector('#occ-level').value,
+      };
+      assignState.occPage = 1;
+      renderOccupancy(c, rows);
+    };
+    let t;
+    box.querySelector('#occ-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 250); });
+    ['#occ-route', '#occ-status', '#occ-level'].forEach((id) => box.querySelector(id).addEventListener('change', apply));
+    box.querySelector('#occ-clear').addEventListener('click', () => {
+      assignState.occFilters = {};
+      assignState.occPage = 1;
+      renderOccupancy(c, rows);
+    });
+    box.querySelector('#occ-prev').addEventListener('click', () => { assignState.occPage--; renderOccupancy(c, rows); });
+    box.querySelector('#occ-next').addEventListener('click', () => { assignState.occPage++; renderOccupancy(c, rows); });
     if (canEdit) {
       box.querySelectorAll('[data-bus-route]').forEach((button) => {
         button.addEventListener('click', () => editBusRoute(c, JSON.parse(button.dataset.busRoute), rows));
@@ -928,7 +1059,7 @@
     if (!table) { toast('No route summary available to print.', 'warning'); return; }
     printHtml('Route Wise Student Summary', table.outerHTML);
   }
-  async function renderRouteStudentSummary(box, sourceRows, { mode = 'category', emptyMessage = 'No active students found.' } = {}) {
+  async function renderRouteStudentSummary(box, sourceRows, { mode = 'category', routeSource = 'primary', emptyMessage = 'No active students found.' } = {}) {
     if (!box) return;
     box.innerHTML = spinner();
     try {
@@ -1001,7 +1132,8 @@
       const categories = uniqueValues([...(filters.categories || []), ...students.map((s) => s.category || 'Uncategorized')]);
       const routeMap = new Map();
       students.forEach((student) => {
-        const route = String(student.route_number || 'Unassigned');
+        const routeValue = routeSource === 'today' ? todayRoute(student) : student.route_number;
+        const route = String(routeValue || 'Unassigned');
         const category = String(student.category || 'Uncategorized');
         if (!routeMap.has(route)) {
           routeMap.set(route, { route, total: 0, categories: Object.fromEntries(categories.map((c) => [c, 0])) });
@@ -1221,7 +1353,7 @@
   }
 
   // ============================ NOTIFICATIONS ============================
-  const notifState = { selected: new Set() };
+  const notifState = { selected: new Set(), sendSearch: '', logPage: 1, logPageSize: 20, logRows: [], logSearch: '' };
   async function notifications(c) {
     notifState.selected.clear();
     c.innerHTML = `
@@ -1264,6 +1396,10 @@
             <button class="btn secondary" id="n-refresh">${Icons.svg('refresh', 16)} Load</button>
             <button class="btn success" id="n-send" disabled>${Icons.svg('send', 16)} Send Route Notification</button>
           </div>
+        </div>
+        <div class="toolbar">
+          <span class="input-icon">${Icons.svg('search', 16)}<input id="n-search" placeholder="Search student / mobile / route / bus" value="${esc(notifState.sendSearch || '')}"></span>
+          <button class="btn secondary sm" id="n-search-clear" type="button">${Icons.svg('x', 14)} Clear Search</button>
         </div>
         <div id="n-status"></div>
         <div id="n-grid">${spinner()}</div>
@@ -1316,8 +1452,34 @@
       loadNotifPreview(content);
     });
     content.querySelector('#n-refresh').addEventListener('click', () => loadNotifPreview(content));
+    let searchTimer;
+    content.querySelector('#n-search').addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        notifState.sendSearch = content.querySelector('#n-search').value.trim();
+        loadNotifPreview(content);
+      }, 250);
+    });
+    content.querySelector('#n-search-clear').addEventListener('click', () => {
+      content.querySelector('#n-search').value = '';
+      notifState.sendSearch = '';
+      loadNotifPreview(content);
+    });
     content.querySelector('#n-send').addEventListener('click', () => sendNotifs(content));
     await loadNotifPreview(content);
+  }
+  function matchesNotificationSearch(row, search) {
+    if (!search) return true;
+    return [
+      row.name,
+      row.mobile,
+      row.route_number,
+      row.bus_number,
+      row.driver_mobile,
+      row.tracking_link,
+      row.ready ? 'ready' : 'missing data',
+      row.reason,
+    ].some((value) => String(value || '').toLowerCase().includes(search));
   }
   async function loadNotifPreview(content) {
     notifState.selected.clear();
@@ -1338,36 +1500,41 @@
       params.set('routes', routes.join(','));
     }
     const res = await API.get(`/notifications/preview?${params}`);
+    const search = String(notifState.sendSearch || '').trim().toLowerCase();
+    const previewRows = (res.data || []).filter((row) => matchesNotificationSearch(row, search));
     const scopeNote = scope === 'route'
       ? (selectedRoutes.length
         ? `<div class="alert info">Selected route(s): <b>${selectedRoutes.map(esc).join(', ')}</b></div>`
         : '<div class="alert info">Showing all available routes.</div>')
       : '';
     content.querySelector('#n-status').innerHTML = scopeNote;
-    if (!res.data.length) {
-      grid.innerHTML = '<div class="empty">No students to notify.</div>';
+    if (!previewRows.length) {
+      grid.innerHTML = search ? '<div class="empty">No notification rows match the search.</div>' : '<div class="empty">No students to notify.</div>';
       updateNotifBtn(content);
       return;
     }
     if (scope === 'route') {
       const grouped = new Map(routes.map((route) => [String(route), { route: String(route), students: [] }]));
-      res.data.forEach((student) => {
+      previewRows.forEach((student) => {
         const route = String(student.route_number || '');
         if (!grouped.has(route)) grouped.set(route, { route, students: [] });
         grouped.get(route).students.push(student);
       });
       const rows = [...grouped.values()].filter((row) => row.students.length);
       grid.innerHTML = `<div class="table-wrap"><table>
-        <thead><tr><th class="checkbox-cell"><input type="checkbox" id="n-all"></th><th>Route</th><th>Students</th><th>Ready</th><th>Bus</th><th>Status</th></tr></thead>
+        <thead><tr><th class="checkbox-cell"><input type="checkbox" id="n-all"></th><th>Route</th><th>Students</th><th>Driver Number</th><th>Tracking</th><th>Bus</th><th>Status</th></tr></thead>
         <tbody>${rows.map((row) => {
           const readyStudents = row.students.filter((student) => student.ready);
           const readyIds = readyStudents.map((student) => student.student_id);
           const buses = uniqueValues(row.students.map((student) => student.bus_number || ''));
+          const driverNumbers = uniqueValues(row.students.map((student) => student.driver_mobile || ''));
+          const trackingLinks = uniqueValues(row.students.map((student) => student.tracking_link || ''));
           return `<tr>
             <td class="checkbox-cell"><input type="checkbox" class="n-route-check" value="${esc(row.route)}" data-ids="${esc(readyIds.join(','))}" ${readyIds.length ? '' : 'disabled'}></td>
             <td>${badge(row.route, 'blue')}</td>
             <td>${row.students.length}</td>
-            <td>${readyStudents.length}</td>
+            <td>${driverNumbers.length ? driverNumbers.map(esc).join(', ') : '-'}</td>
+            <td>${trackingLinks.length ? trackingLinks.map((link) => `<a href="${esc(link)}" target="_blank" rel="noopener" class="icon-btn" title="Open tracking directions">${Icons.svg('pin', 15)} Track</a>`).join(' ') : '-'}</td>
             <td>${buses.length ? buses.map(esc).join(', ') : '-'}</td>
             <td>${readyIds.length ? badge('Ready', 'green') : badge('Missing data', 'amber')}</td>
           </tr>`;
@@ -1393,7 +1560,7 @@
     }
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th class="checkbox-cell"><input type="checkbox" id="n-all"></th><th>Name</th><th>Mobile</th><th>Route</th><th>Bus</th><th>Tracking</th><th>Ready</th></tr></thead>
-      <tbody>${res.data.map((s) => `<tr>
+      <tbody>${previewRows.map((s) => `<tr>
         <td class="checkbox-cell"><input type="checkbox" class="n-check" value="${s.student_id}" ${s.ready ? '' : 'disabled'}></td>
         <td>${esc(s.name)}</td><td>${esc(s.mobile || '-')}</td>
         <td>${s.route_number ? badge(s.route_number, 'blue') : '-'}</td><td>${esc(s.bus_number || '-')}</td>
@@ -1427,13 +1594,30 @@
   }
   async function renderLog(content) {
     content.innerHTML = `<div class="card">
-      <div class="toolbar"><select id="l-status"><option value="">All Status</option>${options(['Sent', 'Failed', 'Pending'], '')}</select>
+      <div class="toolbar">
+        <span class="input-icon">${Icons.svg('search', 16)}<input id="l-search" placeholder="Search student / mobile / status / message" value="${esc(notifState.logSearch || '')}"></span>
+        <select id="l-status"><option value="">All Status</option>${options(['Sent', 'Failed', 'Pending'], '')}</select>
         <button class="btn secondary sm" id="l-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
         <button class="btn secondary" id="l-export">${Icons.svg('download', 16)} Export</button></div>
       <div id="l-grid">${spinner()}</div></div>`;
-    content.querySelector('#l-status').addEventListener('change', () => loadLog(content));
+    let t;
+    content.querySelector('#l-search').addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        notifState.logSearch = content.querySelector('#l-search').value.trim();
+        notifState.logPage = 1;
+        renderLogRows(content);
+      }, 250);
+    });
+    content.querySelector('#l-status').addEventListener('change', () => {
+      notifState.logPage = 1;
+      loadLog(content);
+    });
     content.querySelector('#l-clear').addEventListener('click', () => {
+      content.querySelector('#l-search').value = '';
       content.querySelector('#l-status').value = '';
+      notifState.logSearch = '';
+      notifState.logPage = 1;
       loadLog(content);
     });
     content.querySelector('#l-export').addEventListener('click', () => API.download('/reports/whatsapp/export', 'whatsapp-delivery.xlsx').catch((e) => toast(e.message, 'error')));
@@ -1444,22 +1628,65 @@
     grid.innerHTML = spinner();
     const status = content.querySelector('#l-status').value;
     const rows = await API.get(`/notifications/log${status ? '?status=' + status : ''}`);
+    notifState.logRows = rows;
+    renderLogRows(content);
+  }
+  function renderLogRows(content) {
+    const grid = content.querySelector('#l-grid');
+    const rows = notifState.logRows || [];
     if (!rows.length) { grid.innerHTML = '<div class="empty">No messages logged yet.</div>'; return; }
-    const incharge = API.canAccess('notifications');
+    const search = String(notifState.logSearch || '').trim().toLowerCase();
+    const filteredRows = rows.filter((row) => !search || [
+      row.student_name,
+      row.mobile,
+      row.status,
+      row.bus_number,
+      row.tracking_link,
+      row.message,
+      row.provider_response,
+    ].some((value) => String(value || '').toLowerCase().includes(search)));
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / notifState.logPageSize));
+    if (notifState.logPage > totalPages) notifState.logPage = totalPages;
+    if (notifState.logPage < 1) notifState.logPage = 1;
+    const start = (notifState.logPage - 1) * notifState.logPageSize;
+    const pageRows = filteredRows.slice(start, start + notifState.logPageSize);
+    if (!filteredRows.length) {
+      grid.innerHTML = '<div class="empty">No messages match the selected filters.</div>';
+      return;
+    }
     grid.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>Student</th><th>Mobile</th><th>Sent Time</th><th>Status</th>${incharge ? '<th>Action</th>' : ''}</tr></thead>
-      <tbody>${rows.map((r) => `<tr><td>${esc(r.student_name)}</td><td>${esc(r.mobile || '-')}</td>
+      <thead><tr><th>Student</th><th>Mobile</th><th>Sent Time</th><th>Status</th><th>Message</th></tr></thead>
+      <tbody>${pageRows.map((r) => `<tr><td>${esc(r.student_name)}</td><td>${esc(r.mobile || '-')}</td>
         <td>${fmtDateTime(r.sent_at)}</td>
         <td>${badge(r.status, r.status === 'Sent' ? 'green' : r.status === 'Failed' ? 'red' : 'amber')}</td>
-        ${incharge ? `<td>${r.status === 'Failed' ? `<button class="icon-btn" data-resend="${r.id}">${Icons.svg('refresh', 15)} Resend</button>` : '-'}</td>` : ''}</tr>`).join('')}
-      </tbody></table></div>`;
-    grid.querySelectorAll('[data-resend]').forEach((b) => b.addEventListener('click', async () => {
-      try { const r = await API.post(`/notifications/resend/${b.dataset.resend}`); toast(`Resend: ${r.status}.`, r.status === 'Sent' ? 'success' : 'error'); loadLog(content); }
-      catch (e) { toast(e.message, 'error'); }
+        <td><button class="icon-btn" data-message="${r.id}" title="Preview message">${Icons.svg('message', 15)} Preview</button></td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="pagination" id="l-pager">
+        <span class="muted">${filteredRows.length} messages - page ${notifState.logPage} of ${totalPages}</span>
+        <button class="btn secondary sm" id="l-prev" ${notifState.logPage <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+        <button class="btn secondary sm" id="l-next" ${notifState.logPage >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+      </div>`;
+    grid.querySelectorAll('[data-message]').forEach((button) => button.addEventListener('click', () => {
+      const row = rows.find((r) => String(r.id) === String(button.dataset.message));
+      showMessagePreview(row);
     }));
+    grid.querySelector('#l-prev').addEventListener('click', () => { notifState.logPage--; renderLogRows(content); });
+    grid.querySelector('#l-next').addEventListener('click', () => { notifState.logPage++; renderLogRows(content); });
+  }
+  function showMessagePreview(row) {
+    if (!row) return;
+    modal({
+      title: `Message - ${row.student_name || 'Notification'}`,
+      body: `
+        <div class="field"><label>Sent To</label><div>${esc(row.mobile || '-')}</div></div>
+        <div class="field"><label>Sent Time</label><div>${fmtDateTime(row.sent_at)}</div></div>
+        <div class="alert info" style="white-space:pre-wrap;line-height:1.55">${esc(row.message || 'No message content saved.')}</div>`,
+      footer: '<button class="btn secondary" data-close>Close</button>',
+    });
   }
 
   // ============================ REPORTS ============================
+  const reportState = { whatsappPage: 1, whatsappPageSize: 20, whatsappRows: [], whatsappSearch: '' };
   async function reports(c) {
     c.innerHTML = `
       <div class="tabs">
@@ -1498,12 +1725,62 @@
   }
   async function repWhatsapp(content) {
     content.innerHTML = `<div class="card"><div class="section-head"><h2>WhatsApp Delivery Report</h2>
-      <button class="btn secondary" id="exp">${Icons.svg('download', 16)} Export</button></div><div id="rt">${spinner()}</div></div>`;
+      <button class="btn secondary" id="exp">${Icons.svg('download', 16)} Export</button></div>
+      <div class="toolbar">
+        <span class="input-icon">${Icons.svg('search', 16)}<input id="wr-search" placeholder="Search student / mobile / status" value="${esc(reportState.whatsappSearch || '')}"></span>
+        <button class="btn secondary sm" id="wr-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
+      </div>
+      <div id="rt">${spinner()}</div></div>`;
     content.querySelector('#exp').addEventListener('click', () => API.download('/reports/whatsapp/export', 'whatsapp-delivery.xlsx').catch((e) => toast(e.message, 'error')));
+    let t;
+    content.querySelector('#wr-search').addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        reportState.whatsappSearch = content.querySelector('#wr-search').value.trim();
+        reportState.whatsappPage = 1;
+        renderWhatsappReport(content);
+      }, 250);
+    });
+    content.querySelector('#wr-clear').addEventListener('click', () => {
+      content.querySelector('#wr-search').value = '';
+      reportState.whatsappSearch = '';
+      reportState.whatsappPage = 1;
+      renderWhatsappReport(content);
+    });
     const r = await API.get('/reports/whatsapp');
-    content.querySelector('#rt').innerHTML = reportTable(
+    reportState.whatsappRows = r.data.map((x) => ({ ...x, sent_time: fmtDateTime(x.sent_time) }));
+    renderWhatsappReport(content);
+  }
+  function renderWhatsappReport(content) {
+    const target = content.querySelector('#rt');
+    const rows = reportState.whatsappRows || [];
+    if (!rows.length) { target.innerHTML = '<div class="empty">No data.</div>'; return; }
+    const search = String(reportState.whatsappSearch || '').trim().toLowerCase();
+    const filteredRows = rows.filter((row) => !search || [
+      row.student_name,
+      row.mobile,
+      row.message_status,
+      row.sent_time,
+    ].some((value) => String(value || '').toLowerCase().includes(search)));
+    if (!filteredRows.length) {
+      target.innerHTML = '<div class="empty">No report rows match the selected filters.</div>';
+      return;
+    }
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / reportState.whatsappPageSize));
+    if (reportState.whatsappPage > totalPages) reportState.whatsappPage = totalPages;
+    if (reportState.whatsappPage < 1) reportState.whatsappPage = 1;
+    const start = (reportState.whatsappPage - 1) * reportState.whatsappPageSize;
+    const pageRows = filteredRows.slice(start, start + reportState.whatsappPageSize);
+    target.innerHTML = `${reportTable(
       [{ h: 'Student Name', k: 'student_name' }, { h: 'Mobile', k: 'mobile' }, { h: 'Message Status', k: 'message_status' }, { h: 'Sent Time', k: 'sent_time' }],
-      r.data.map((x) => ({ ...x, sent_time: fmtDateTime(x.sent_time) })));
+      pageRows)}
+      <div class="pagination" id="wr-pager">
+        <span class="muted">${filteredRows.length} rows - page ${reportState.whatsappPage} of ${totalPages}</span>
+        <button class="btn secondary sm" id="wr-prev" ${reportState.whatsappPage <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+        <button class="btn secondary sm" id="wr-next" ${reportState.whatsappPage >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+      </div>`;
+    target.querySelector('#wr-prev').addEventListener('click', () => { reportState.whatsappPage--; renderWhatsappReport(content); });
+    target.querySelector('#wr-next').addEventListener('click', () => { reportState.whatsappPage++; renderWhatsappReport(content); });
   }
 
   // ============================ SETTINGS ============================

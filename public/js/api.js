@@ -22,7 +22,7 @@
   }
   function canAccess(page) {
     const u = getUser();
-    return !!(u && (u.role === 'transport_incharge' || (Array.isArray(u.access) && u.access.includes(page))));
+    return !!(u && Array.isArray(u.access) && u.access.includes(page));
   }
 
   async function request(method, path, body, opts = {}) {

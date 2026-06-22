@@ -180,6 +180,7 @@ button { font-family: inherit; cursor: pointer; }
 .dd-item.danger { color: var(--danger); }
 .dd-item.danger:hover { background: var(--danger-soft); }
 .content { padding: 28px; flex: 1; max-width: 1400px; width: 100%; }
+.content.content-full { max-width: none; }
 
 /* ---------- Section heads ---------- */
 .section-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }

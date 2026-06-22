@@ -35,6 +35,16 @@ function validateCode(value, label, { required = false, max = 50 } = {}) {
   return '';
 }
 
+function validateRouteNumber(value, label, { required = false, max = 50 } = {}) {
+  const v = clean(value);
+  if (!v) return required ? `${label} is required.` : '';
+  if (v.length > max) return `${label} must be ${max} characters or fewer.`;
+  if (/[\r\n\t]/.test(v)) {
+    return `${label} cannot contain line breaks or tabs.`;
+  }
+  return '';
+}
+
 function validatePersonName(value, label, { required = false } = {}) {
   const v = clean(value);
   if (!v) return required ? `${label} is required.` : '';
@@ -235,7 +245,7 @@ function validateStudent(body, { partial = false } = {}) {
   }
   if (body.route_number !== undefined) {
     const route = clean(body.route_number);
-    const err = validateCode(route, 'Primary Route Number');
+    const err = validateRouteNumber(route, 'Primary Route Number');
     if (err) errors.push(err);
     else data.route_number = route || null;
   }
@@ -401,7 +411,7 @@ function buildBulkPreview(rows) {
     const categoryError = validateSettingValue(data.category, 'Category of Drop', { required: true });
     if (categoryError) rowErrors.push(categoryError);
     if (mobileError) rowErrors.push(mobileError);
-    const routeError = validateCode(data.route_number, 'Route No');
+    const routeError = validateRouteNumber(data.route_number, 'Route No');
     if (routeError) rowErrors.push(routeError);
     if (data.student_code) {
       if (seenCodes.has(data.student_code)) rowErrors.push('Duplicate Student ID in file');

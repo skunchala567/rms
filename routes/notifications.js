@@ -23,6 +23,12 @@ async function routeForTodayTrip(studentId) {
   `).get(studentId, today());
   return row ? row.route_number : null;
 }
+async function notificationActorId(req) {
+  const id = Number(req.user && req.user.id);
+  if (!id) return null;
+  const row = await db.prepare('SELECT id FROM users WHERE id = ?').get(id);
+  return row ? id : null;
+}
 
 // GET /api/notifications/preview
 router.get('/preview', async (req, res, next) => {
@@ -68,6 +74,7 @@ router.get('/preview', async (req, res, next) => {
         student_id: s.id, student_code: s.student_code, name: s.name,
         route_number: s.route_number, mobile: s.parent_mobile,
         bus_number: bus ? bus.bus_number : null,
+        driver_mobile: bus ? bus.driver_mobile : null,
         tracking_link: bus ? bus.gps_link : null,
         ready: mobileReady && !!bus,
         reason: !mobileReady ? 'Invalid or missing mobile number' : (!bus ? 'No active bus for route' : ''),
@@ -90,6 +97,7 @@ router.post('/send', requirePageAccess('notifications'), async (req, res, next) 
     `;
 
     const results = [];
+    const sentBy = await notificationActorId(req);
     for (const id of ids) {
       const s = await db.prepare('SELECT * FROM students WHERE id = ?').get(id);
       if (!s) continue;
@@ -106,7 +114,7 @@ router.post('/send', requirePageAccess('notifications'), async (req, res, next) 
       await db.prepare(logSql).run({
         student_id: s.id, student_name: s.name, mobile: s.parent_mobile || '',
         bus_number: bus ? bus.bus_number : '', tracking_link: bus ? bus.gps_link : '',
-        message: r.message, status: r.status, provider_response: r.response, sent_by: req.user.id,
+        message: r.message, status: r.status, provider_response: r.response, sent_by: sentBy,
       });
       results.push({ student_id: s.id, name: s.name, status: r.status });
     }
@@ -122,6 +130,7 @@ router.post('/resend/:logId', requirePageAccess('notifications'), async (req, re
   try {
     const log = await db.prepare('SELECT * FROM notification_log WHERE id = ?').get(req.params.logId);
     if (!log) return res.status(404).json({ error: 'Log entry not found.' });
+    const sentBy = await notificationActorId(req);
 
     const student = log.student_id ? await db.prepare('SELECT * FROM students WHERE id = ?').get(log.student_id) : null;
     const bus = student ? await busForRoute(student.route_number) : null;
@@ -138,7 +147,7 @@ router.post('/resend/:logId', requirePageAccess('notifications'), async (req, re
       INSERT INTO notification_log (student_id, student_name, mobile, bus_number, tracking_link, message, status, provider_response, sent_by)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(log.student_id, log.student_name, log.mobile, log.bus_number, log.tracking_link,
-      r.message, r.status, r.response, req.user.id);
+      r.message, r.status, r.response, sentBy);
 
     res.json({ ok: true, status: r.status });
   } catch (err) { next(err); }
