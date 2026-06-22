@@ -21,14 +21,66 @@
     return `<datalist id="${esc(id)}">${uniqueValues(values).map((v) => `<option value="${esc(v)}"></option>`).join('')}</datalist>`;
   }
   function routeSearchInput(name, value, routes, placeholder = 'Search route number') {
-    const listId = `route-list-${Math.random().toString(36).slice(2, 9)}`;
-    return `<input name="${esc(name)}" value="${esc(value || '')}" list="${esc(listId)}" placeholder="${esc(placeholder)}" autocomplete="off">${dataList(listId, routes)}`;
+    const routeValues = uniqueValues(routes);
+    return `<div class="suggest-field route-suggest-field">
+      <input class="route-suggest-input" name="${esc(name)}" value="${esc(value || '')}" placeholder="${esc(placeholder)}" autocomplete="off">
+      <div class="suggest-list hidden">
+        ${routeValues.map((route) => `<button type="button" class="suggest-item" data-route="${esc(route)}">${esc(route)}</button>`).join('')}
+      </div>
+    </div>`;
+  }
+  function selectOptions(list, selected, { includeBlank = false, blankLabel = 'Select', valueKey = 'value', labelKey = 'label' } = {}) {
+    let html = includeBlank ? `<option value="">${esc(blankLabel)}</option>` : '';
+    html += (list || []).map((item) => {
+      const value = typeof item === 'object' ? item[valueKey] : item;
+      const label = typeof item === 'object' ? item[labelKey] : item;
+      return `<option value="${esc(value || '')}" ${String(value || '') === String(selected || '') ? 'selected' : ''}>${esc(label || value || '')}</option>`;
+    }).join('');
+    return html;
   }
   function todayRoute(student) {
     return student.temporary_route_number || student.route_number || '';
   }
   function actualRoute(student) {
     return student.actual_route_number || student.primary_route_number || (!student.temporary_route_number ? student.route_number : '') || '';
+  }
+  function bindRouteSuggests(root) {
+    (root || document).querySelectorAll('.route-suggest-field').forEach((fieldEl) => {
+      if (fieldEl.dataset.bound) return;
+      fieldEl.dataset.bound = '1';
+      const input = fieldEl.querySelector('.route-suggest-input');
+      const list = fieldEl.querySelector('.suggest-list');
+      const items = [...list.querySelectorAll('[data-route]')];
+      const render = () => {
+        const term = input.value.trim().toLowerCase();
+        let shown = 0;
+        items.forEach((item) => {
+          const match = !term || item.dataset.route.toLowerCase().includes(term);
+          item.classList.toggle('hidden', !match);
+          if (match) shown += 1;
+        });
+        let empty = list.querySelector('.suggest-empty');
+        if (!shown) {
+          if (!empty) {
+            empty = document.createElement('div');
+            empty.className = 'suggest-empty';
+            empty.textContent = 'No matching routes';
+            list.appendChild(empty);
+          }
+        } else if (empty) empty.remove();
+        list.classList.remove('hidden');
+      };
+      input.addEventListener('focus', render);
+      input.addEventListener('input', render);
+      input.addEventListener('blur', () => setTimeout(() => list.classList.add('hidden'), 120));
+      items.forEach((item) => item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        input.value = item.dataset.route;
+        list.classList.add('hidden');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }));
+    });
   }
   function downloadCsv(filename, headers, rows) {
     const csvCell = (value) => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
@@ -61,6 +113,8 @@
   }
 
   // ============================ DASHBOARD ============================
+  const dashboardState = { routeSummarySearch: '', routeSummaryPage: 1, routeSummaryPageSize: 10 };
+
   async function dashboard(c) {
     c.innerHTML = spinner();
     const s = await API.get('/dashboard/summary');
@@ -81,12 +135,57 @@
             <button class="btn secondary" id="btn-export-dashboard-route-summary">${Icons.svg('download', 16)} Export</button>
           </div>
         </div>
+        <div class="toolbar">
+          <span class="input-icon">${Icons.svg('search', 16)}<input id="dashboard-route-summary-search" placeholder="Search route" value="${esc(dashboardState.routeSummarySearch)}"></span>
+        </div>
         <div id="dashboard-route-summary">${spinner()}</div>
+      </div>
+      <div class="card">
+        <div class="section-head"><h2>Unassigned Buses</h2></div>
+        <div id="dashboard-unassigned-buses">${spinner()}</div>
       </div>`;
     c.querySelector('#btn-print-dashboard-route-summary').addEventListener('click', () => printDashboardRouteSummary(c));
     c.querySelector('#btn-export-dashboard-route-summary').addEventListener('click', exportDashboardRouteSummary);
+    let searchTimer;
+    c.querySelector('#dashboard-route-summary-search').addEventListener('input', (e) => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        dashboardState.routeSummarySearch = e.target.value.trim();
+        dashboardState.routeSummaryPage = 1;
+        renderDashboardRouteSummary(c);
+      }, 250);
+    });
+    await Promise.all([renderDashboardRouteSummary(c), renderDashboardUnassignedBuses(c)]);
+  }
+  async function renderDashboardRouteSummary(c) {
     const trips = await API.get('/trips/today');
-    await renderRouteStudentSummary(c.querySelector('#dashboard-route-summary'), trips.data || [], { routeSource: 'today' });
+    await renderRouteStudentSummary(c.querySelector('#dashboard-route-summary'), trips.data || [], {
+      routeSource: 'today',
+      paginate: true,
+      pageState: dashboardState,
+      pageKey: 'routeSummaryPage',
+      pageSizeKey: 'routeSummaryPageSize',
+      search: dashboardState.routeSummarySearch,
+    });
+  }
+  async function renderDashboardUnassignedBuses(c) {
+    const box = c.querySelector('#dashboard-unassigned-buses');
+    try {
+      const buses = await API.get('/buses');
+      const rows = (buses || []).filter((bus) => !String(bus.route_number || '').trim());
+      if (!rows.length) { box.innerHTML = '<div class="empty">No unassigned buses.</div>'; return; }
+      box.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>Bus No</th><th>Capacity</th><th>Driver</th><th>Status</th></tr></thead>
+        <tbody>${rows.map((bus) => `<tr>
+          <td><b>${esc(bus.bus_number || '-')}</b></td>
+          <td>${bus.seating_capacity || 0}</td>
+          <td>${esc(bus.driver_name || '-')}${bus.driver_mobile ? '<br><span class="muted">' + esc(bus.driver_mobile) + '</span>' : ''}</td>
+          <td>${statusBadge(bus.status || 'Active')}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+    } catch (e) {
+      box.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
+    }
   }
   function statCard(label, value, icon, cls) {
     return `<div class="stat-card ${cls}">
@@ -180,6 +279,7 @@
       <select id="f-status"><option value="">All Status</option>${options(['Active', 'Inactive'], f.status)}</select>
       <button class="btn secondary sm" id="f-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>`;
     c.querySelector('input[name="route"]').id = 'f-route';
+    bindRouteSuggests(c.querySelector('#filters'));
     const apply = () => {
       studentState.filters = {
         search: c.querySelector('#f-search').value.trim(),
@@ -323,13 +423,14 @@
           ${field('Category of Drop', `<select name="category" required><option value="">-- Select --</option>${options(categoryOptions, s.category)}</select>`, true)}
           ${field('Parent Name', `<input name="parent_name" value="${esc(s.parent_name || '')}" minlength="2" maxlength="150" pattern="[A-Za-z .'-]*[A-Za-z][A-Za-z .'-]*" title="Use letters, spaces, dot, apostrophe, or hyphen." required>`, true)}
           ${field('Parent Mobile Number', `<input name="parent_mobile" type="tel" inputmode="numeric" value="${esc(s.parent_mobile || '')}" pattern="(?:\\+?91|0)?[6-9][0-9]{9}" title="Enter a valid 10-digit Indian mobile number." required>`, true)}
-          ${field('Primary Route Number', `<select name="route_number"><option value="">Awaiting Route Assignment</option>${options(routeOptions, s.route_number)}</select>`)}
+          ${field('Primary Route Number', routeSearchInput('route_number', s.route_number || '', routeOptions, 'Search route number'))}
           ${field('Status', `<select name="status" required>${options(['Active', 'Inactive'], s.status || 'Active')}</select>`, true)}
         </div>
       </form>`,
       footer: `<button class="btn secondary" data-close>Cancel</button>
                <button class="btn" id="save-stu">${editing ? 'Update' : 'Save'}</button>`,
       onMount: (el, close) => {
+        bindRouteSuggests(el);
         el.querySelector('#save-stu').addEventListener('click', async () => {
           const form = el.querySelector('#stu-form');
           if (!form.reportValidity()) return;
@@ -425,10 +526,12 @@
   }
 
   // ============================ 5 PM TRIPS ============================
-  const tripState = { selected: new Set(), filters: {} };
+  const tripState = { selected: new Set(), filters: {}, listPage: 1, listPageSize: 10, studentPage: 1, studentPageSize: 10 };
 
   async function trips(c) {
     tripState.selected.clear();
+    tripState.listPage = 1;
+    tripState.studentPage = 1;
     c.innerHTML = `
       <div class="section-head"><h2>Allocate transport</h2></div>
       <div class="card">
@@ -464,15 +567,26 @@
     const res = await API.get('/trips/today');
     c.querySelector('#trip-date').textContent = `(${res.date}) — ${res.count} assigned`;
     if (!res.data.length) { box.innerHTML = '<div class="empty">No students assigned for today yet.</div>'; return; }
+    const rows = res.data || [];
+    const totalPages = Math.max(1, Math.ceil(rows.length / tripState.listPageSize));
+    if (tripState.listPage > totalPages) tripState.listPage = totalPages;
+    if (tripState.listPage < 1) tripState.listPage = 1;
+    const start = (tripState.listPage - 1) * tripState.listPageSize;
+    const pageRows = rows.slice(start, start + tripState.listPageSize);
     box.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th>Student ID</th><th>Name</th><th>Class</th><th>Category</th><th>Today's Route</th><th>Bus</th><th>Added Date & Time</th><th>Action</th></tr></thead>
-      <tbody>${res.data.map((t) => `<tr>
+      <tbody>${pageRows.map((t) => `<tr>
         <td>${esc(t.student_code)}</td><td>${esc(t.name)}</td><td>${esc(t.class || '-')}${t.section ? '-' + esc(t.section) : ''}</td>
         <td>${esc(t.category || '-')}</td><td>${todayRoute(t) ? badge(todayRoute(t), 'amber') : '<span class="muted">-</span>'}</td>
         <td>${esc(t.bus_number || t.route_bus_number || '-')}</td>
         <td>${fmtDateTime(t.created_at)}</td>
         <td><button class="icon-btn danger" data-rm="${t.trip_id}">Remove</button></td></tr>`).join('')}
-      </tbody></table></div>`;
+      </tbody></table></div>
+      <div class="pagination" id="trip-list-pager">
+        <span class="muted">${rows.length} students - page ${tripState.listPage} of ${totalPages}</span>
+        <button class="btn secondary sm" id="trip-list-prev" ${tripState.listPage <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+        <button class="btn secondary sm" id="trip-list-next" ${tripState.listPage >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+      </div>`;
     box.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', async () => {
       try { await API.del(`/trips/${b.dataset.rm}`); toast('Removed from trip.', 'success'); await loadTripList(c); }
       catch (e) { toast(e.message, 'error'); }
@@ -546,6 +660,7 @@
         class: selectedClasses.join(','), section: c.querySelector('#t-section').value,
         category: c.querySelector('#t-category').value, route: c.querySelector('#t-route').value,
       };
+      tripState.studentPage = 1;
       loadTripStudents(c);
     };
     const closeClassMenu = () => {
@@ -577,6 +692,7 @@
       });
     });
     updateClassFilter();
+    bindRouteSuggests(c.querySelector('#trip-filters'));
     let t;
     c.querySelector('#t-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 300); });
     c.querySelector('#t-route').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 300); });
@@ -591,6 +707,7 @@
       classList.querySelectorAll('.route-option').forEach((option) => option.classList.remove('hidden'));
       closeClassMenu();
       tripState.filters = {};
+      tripState.studentPage = 1;
       updateClassFilter();
       loadTripStudents(c);
     });
@@ -602,11 +719,13 @@
     grid.innerHTML = spinner();
     const f = tripState.filters;
     const params = new URLSearchParams({
-      pageSize: 500, status: 'Active', search: f.search || '', class: f.class || '',
+      page: tripState.studentPage, pageSize: tripState.studentPageSize, status: 'Active', search: f.search || '', class: f.class || '',
       section: f.section || '', category: f.category || '', route: f.route || '',
     });
     const res = await API.get(`/students?${params}`);
     if (!res.data.length) { grid.innerHTML = '<div class="empty">No matching students.</div>'; return; }
+    if (tripState.studentPage > res.totalPages) tripState.studentPage = Number(res.totalPages) || 1;
+    if (tripState.studentPage < 1) tripState.studentPage = 1;
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th class="checkbox-cell"><input type="checkbox" id="t-all"></th>
         <th>Student ID</th><th>Name</th><th>Class</th><th>Category</th><th>Route</th></tr></thead>
@@ -614,7 +733,12 @@
         <td class="checkbox-cell"><input type="checkbox" class="t-check" value="${s.id}" ${tripState.selected.has(s.id) ? 'checked' : ''}></td>
         <td>${esc(s.student_code)}</td><td>${esc(s.name)}</td><td>${esc(s.class || '-')}</td>
         <td>${esc(s.category || '-')}</td><td>${s.route_number ? badge(s.route_number, 'blue') : '<span class="muted">-</span>'}</td></tr>`).join('')}
-      </tbody></table></div>`;
+      </tbody></table></div>
+      <div class="pagination" id="trip-student-pager">
+        <span class="muted">${res.total} students - page ${res.page} of ${res.totalPages}</span>
+        <button class="btn secondary sm" id="trip-student-prev" ${res.page <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+        <button class="btn secondary sm" id="trip-student-next" ${res.page >= res.totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+      </div>`;
     grid.querySelector('#t-all').addEventListener('change', (e) => {
       grid.querySelectorAll('.t-check').forEach((cb) => {
         cb.checked = e.target.checked;
@@ -626,6 +750,8 @@
       if (cb.checked) tripState.selected.add(Number(cb.value)); else tripState.selected.delete(Number(cb.value));
       updateTripBtn(c);
     }));
+    grid.querySelector('#trip-student-prev').addEventListener('click', () => { tripState.studentPage--; loadTripStudents(c); });
+    grid.querySelector('#trip-student-next').addEventListener('click', () => { tripState.studentPage++; loadTripStudents(c); });
     updateTripBtn(c);
   }
   function updateTripBtn(c) {
@@ -691,7 +817,7 @@
     grid.innerHTML = `
       <div class="toolbar">
         <span class="input-icon">${Icons.svg('search', 16)}<input id="bus-search" placeholder="Search bus / route / driver" value="${esc(filters.search || '')}"></span>
-        <select id="bus-route"><option value="">All Routes</option>${options(routeOptions, filters.route || '')}</select>
+        ${routeSearchInput('bus_route', filters.route || '', routeOptions, 'All Routes')}
         <select id="bus-status"><option value="">All Status</option>${options(statusOptions, filters.status || '')}</select>
         <select id="bus-level">
           <option value="" ${!filters.occupancy ? 'selected' : ''}>All Occupancy</option>
@@ -706,7 +832,7 @@
       <div id="bus-table">${filteredList.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Bus No</th><th>Route No</th><th>Capacity</th><th>Occupied</th><th>Available</th><th>Occupancy</th><th>Driver</th><th>Tracking</th><th>Status</th>${incharge ? '<th>Actions</th>' : ''}</tr></thead>
       <tbody>${pageRows.map((b) => `<tr>
-        <td><b>${esc(b.bus_number)}</b></td><td>${badge(b.route_number, 'blue')}</td>
+        <td><b>${esc(b.bus_number)}</b></td><td>${b.route_number ? badge(b.route_number, 'blue') : '<span class="muted">Unassigned</span>'}</td>
         <td>${b.seating_capacity}</td><td>${b.occupied}</td><td>${b.available}</td>
         <td>${occupancyBar(b.occupied, b.seating_capacity)}</td>
         <td>${esc(b.driver_name || '-')}${b.driver_mobile ? '<br><span class="muted">' + esc(b.driver_mobile) + '</span>' : ''}</td>
@@ -720,6 +846,8 @@
         <button class="btn secondary sm" id="bus-prev" ${busState.page <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
         <button class="btn secondary sm" id="bus-next" ${busState.page >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
       </div>`;
+    grid.querySelector('input[name="bus_route"]').id = 'bus-route';
+    bindRouteSuggests(grid);
     const apply = () => {
       busState.filters = {
         search: grid.querySelector('#bus-search').value.trim(),
@@ -732,7 +860,8 @@
     };
     let t;
     grid.querySelector('#bus-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 250); });
-    ['#bus-route', '#bus-status', '#bus-level'].forEach((id) => grid.querySelector(id).addEventListener('change', apply));
+    grid.querySelector('#bus-route').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 250); });
+    ['#bus-status', '#bus-level'].forEach((id) => grid.querySelector(id).addEventListener('change', apply));
     grid.querySelector('#bus-clear').addEventListener('click', () => {
       busState.filters = {};
       busState.page = 1;
@@ -744,13 +873,15 @@
       grid.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => busForm(c, JSON.parse(b.dataset.edit))));
     }
   }
-  function busForm(c, bus) {
+  async function busForm(c, bus) {
     const editing = !!bus; const b = bus || {};
+    const routes = await API.get('/routes/list');
+    const routeOptions = uniqueValues([...(routes || []), b.route_number]);
     modal({
       title: editing ? 'Edit Bus' : 'Add Bus', size: 'lg',
       body: `<form id="bus-form"><div class="form-grid">
         ${field('Bus Number', `<input name="bus_number" value="${esc(b.bus_number || '')}" maxlength="50" pattern="[A-Za-z0-9]+" title="Use only letters and numbers. No spaces or special characters." required>`, true)}
-        ${field('Route Number', `<input name="route_number" value="${esc(b.route_number || '')}" required>`, true)}
+        ${field('Route Number', routeSearchInput('route_number', b.route_number || '', routeOptions, 'Search route number'), !editing)}
         ${field('Seating Capacity', `<input type="number" min="0" name="seating_capacity" value="${b.seating_capacity != null ? b.seating_capacity : ''}">`)}
         ${field('GPS Tracking Link', `<input name="gps_link" value="${esc(b.gps_link || '')}" placeholder="https://...">`)}
         ${field('Driver Name', `<input name="driver_name" value="${esc(b.driver_name || '')}">`)}
@@ -759,6 +890,8 @@
       </div></form>`,
       footer: `<button class="btn secondary" data-close>Cancel</button><button class="btn" id="save-bus">${editing ? 'Update' : 'Save'}</button>`,
       onMount: (el, close) => {
+        bindRouteSuggests(el);
+        if (!editing) el.querySelector('input[name="route_number"]').required = true;
         el.querySelector('#save-bus').addEventListener('click', async () => {
           const form = el.querySelector('#bus-form');
           if (!form.reportValidity()) return;
@@ -837,9 +970,22 @@
   }
 
   // ============================ ROUTE ASSIGNMENT ============================
-  const assignState = { selected: new Set(), filters: {}, occFilters: {}, occPage: 1, occPageSize: 20 };
+  const assignState = {
+    selected: new Set(),
+    filters: {},
+    occFilters: {},
+    occPage: 1,
+    occPageSize: 10,
+    assignPage: 1,
+    assignPageSize: 10,
+    summaryPage: 1,
+    summaryPageSize: 10,
+  };
   async function routeAssignment(c) {
     assignState.selected.clear();
+    assignState.occPage = 1;
+    assignState.assignPage = 1;
+    assignState.summaryPage = 1;
     const incharge = API.canAccess('route-assignment');
     c.innerHTML = `
       <div class="section-head"><h2>Route Assignment</h2></div>
@@ -868,89 +1014,42 @@
     c.querySelector('#btn-print-route-summary').addEventListener('click', () => printRouteSummary(c));
     await loadOccupancy(c);
     if (incharge) {
-      const [todayTrips, availableRoutes] = await Promise.all([API.get('/trips/today'), API.get('/routes/list')]);
+      const [todayTrips, occupancy] = await Promise.all([API.get('/trips/today'), API.get('/routes/occupancy?scope=trip')]);
       const tripRoutes = uniqueValues((todayTrips.data || []).map((trip) => actualRoute(trip)));
-      c.querySelector('#a-route-filter-wrap').innerHTML = `
-        <div class="route-select filter-select" id="a-route-select">
-          <button type="button" class="route-select-trigger" id="a-route-trigger">
-            <span id="a-route-label">All Routes</span>
-            ${Icons.svg('chevDown', 16)}
-          </button>
-          <div class="route-select-menu filter-select-menu hidden" id="a-route-menu">
-            <input class="filter-select-search" id="a-route-search" placeholder="Search route" autocomplete="off">
-            <div class="route-select-head">
-              <span id="a-route-count">0 selected</span>
-              <button type="button" class="route-clear" id="a-route-clear">Clear</button>
-            </div>
-            <div class="route-option-list" id="a-route-list">
-              ${tripRoutes.map((route) => `
-                <label class="route-option">
-                  <input type="checkbox" value="${esc(route)}">
-                  <span>${esc(route)}</span>
-                </label>`).join('')}
-            </div>
-          </div>
-        </div>`;
-      c.querySelector('#a-target-wrap').innerHTML = routeSearchInput('route', '', availableRoutes, "Today's temporary route");
-      c.querySelector('#a-target-wrap input').id = 'a-target';
-      const routeSelect = c.querySelector('#a-route-select');
-      const routeMenu = c.querySelector('#a-route-menu');
-      const routeList = c.querySelector('#a-route-list');
-      const selectedAssignRoutes = () => [...routeList.querySelectorAll('input:checked')].map((input) => input.value);
-      const updateAssignRouteFilter = () => {
-        const selected = selectedAssignRoutes();
-        c.querySelector('#a-route-count').textContent = `${selected.length} selected`;
-        c.querySelector('#a-route-label').textContent = selected.length
-          ? (selected.length <= 2 ? selected.join(', ') : `${selected.length} routes selected`)
-          : 'All Routes';
-        routeList.querySelectorAll('.route-option').forEach((option) => {
-          option.classList.toggle('selected', option.querySelector('input').checked);
-        });
-        return selected;
-      };
-      const closeAssignRouteMenu = () => {
-        routeMenu.classList.add('hidden');
-        routeSelect.classList.remove('open');
-      };
-      c.querySelector('#a-route-trigger').addEventListener('click', (e) => {
-        e.stopPropagation();
-        const willOpen = routeMenu.classList.contains('hidden');
-        routeMenu.classList.toggle('hidden', !willOpen);
-        routeSelect.classList.toggle('open', willOpen);
-        if (willOpen) c.querySelector('#a-route-search').focus();
-      });
-      c.addEventListener('click', (e) => {
-        if (!routeSelect.contains(e.target)) closeAssignRouteMenu();
-      });
-      routeList.querySelectorAll('input').forEach((input) => input.addEventListener('change', () => {
-        updateAssignRouteFilter();
-        loadAssignStudents(c);
-      }));
-      c.querySelector('#a-route-clear').addEventListener('click', (e) => {
-        e.preventDefault();
-        routeList.querySelectorAll('input').forEach((input) => { input.checked = false; });
-        c.querySelector('#a-route-search').value = '';
-        routeList.querySelectorAll('.route-option').forEach((option) => option.classList.remove('hidden'));
-        updateAssignRouteFilter();
+      c.querySelector('#a-route-filter-wrap').innerHTML = routeSearchInput('actual_route_filter', '', tripRoutes, 'All Routes');
+      c.querySelector('#a-route-filter-wrap input').id = 'a-route-filter';
+      bindRouteSuggests(c.querySelector('#a-route-filter-wrap'));
+      const vehicleOptions = (occupancy || [])
+        .filter((bus) => bus.bus_id && bus.route_number)
+        .map((bus) => ({
+          value: bus.route_number,
+          label: bus.bus_number || '-',
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' }));
+      c.querySelector('#a-target-wrap').innerHTML = `
+        <select id="a-target" name="route">
+          ${selectOptions(vehicleOptions, '', { includeBlank: true, blankLabel: 'Select vehicle number' })}
+        </select>`;
+      c.querySelector('#a-route-filter').addEventListener('input', () => {
+        assignState.assignPage = 1;
+        assignState.summaryPage = 1;
         loadAssignStudents(c);
       });
-      c.querySelector('#a-route-search').addEventListener('input', (e) => {
-        const term = e.target.value.trim().toLowerCase();
-        routeList.querySelectorAll('.route-option').forEach((option) => {
-          option.classList.toggle('hidden', !!term && !option.textContent.toLowerCase().includes(term));
-        });
-      });
-      updateAssignRouteFilter();
       let t;
-      c.querySelector('#a-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => loadAssignStudents(c), 300); });
-      c.querySelector('#a-target').addEventListener('input', () => updateAssignBtn(c));
+      c.querySelector('#a-search').addEventListener('input', () => {
+        clearTimeout(t);
+        t = setTimeout(() => {
+          assignState.assignPage = 1;
+          assignState.summaryPage = 1;
+          loadAssignStudents(c);
+        }, 300);
+      });
+      c.querySelector('#a-target').addEventListener('change', () => updateAssignBtn(c));
       c.querySelector('#a-clear').addEventListener('click', () => {
         c.querySelector('#a-search').value = '';
-        routeList.querySelectorAll('input').forEach((input) => { input.checked = false; });
-        c.querySelector('#a-route-search').value = '';
-        routeList.querySelectorAll('.route-option').forEach((option) => option.classList.remove('hidden'));
-        closeAssignRouteMenu();
-        updateAssignRouteFilter();
+        c.querySelector('#a-route-filter').value = '';
+        assignState.assignPage = 1;
+        assignState.summaryPage = 1;
         loadAssignStudents(c);
       });
       c.querySelector('#btn-assign-route').addEventListener('click', () => doAssign(c, false));
@@ -1003,7 +1102,7 @@
     box.innerHTML = `
       <div class="toolbar">
         <span class="input-icon">${Icons.svg('search', 16)}<input id="occ-search" placeholder="Search bus / route" value="${esc(filters.search || '')}"></span>
-        <select id="occ-route"><option value="">All Routes</option>${options(routeOptions, filters.route || '')}</select>
+        ${routeSearchInput('occ_route', filters.route || '', routeOptions, 'All Routes')}
         <select id="occ-status"><option value="">All Status</option>${options(statusOptions, filters.status || '')}</select>
         <select id="occ-level">
           <option value="" ${!filters.occupancy ? 'selected' : ''}>All Occupancy</option>
@@ -1018,7 +1117,7 @@
       <div id="occ-grid">${filteredRows.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Bus</th><th>Route</th><th>Capacity</th><th>Occupied</th><th>Available</th><th>Occupancy</th><th>Status</th>${canEdit ? '<th>Actions</th>' : ''}</tr></thead>
       <tbody>${pageRows.map((r) => `<tr>
-        <td><b>${esc(r.bus_number || '-')}</b></td><td>${badge(r.route_number, 'blue')}</td>
+        <td><b>${esc(r.bus_number || '-')}</b></td><td>${r.route_number ? badge(r.route_number, 'blue') : '<span class="muted">Unassigned</span>'}</td>
         <td>${r.capacity}</td><td>${r.occupied}</td><td>${r.available}</td>
         <td>${occupancyBar(r.occupied, r.capacity)}</td><td>${statusBadge(r.status || 'Active')}</td>
         ${canEdit ? `<td><button class="icon-btn" data-bus-route='${esc(JSON.stringify(r))}' title="Edit route">${Icons.svg('edit', 15)} Edit</button></td>` : ''}</tr>`).join('')}
@@ -1028,6 +1127,8 @@
         <button class="btn secondary sm" id="occ-prev" ${assignState.occPage <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
         <button class="btn secondary sm" id="occ-next" ${assignState.occPage >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
       </div>`;
+    box.querySelector('input[name="occ_route"]').id = 'occ-route';
+    bindRouteSuggests(box);
     const apply = () => {
       assignState.occFilters = {
         search: box.querySelector('#occ-search').value.trim(),
@@ -1040,7 +1141,8 @@
     };
     let t;
     box.querySelector('#occ-search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 250); });
-    ['#occ-route', '#occ-status', '#occ-level'].forEach((id) => box.querySelector(id).addEventListener('change', apply));
+    box.querySelector('#occ-route').addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 250); });
+    ['#occ-status', '#occ-level'].forEach((id) => box.querySelector(id).addEventListener('change', apply));
     box.querySelector('#occ-clear').addEventListener('click', () => {
       assignState.occFilters = {};
       assignState.occPage = 1;
@@ -1059,7 +1161,16 @@
     if (!table) { toast('No route summary available to print.', 'warning'); return; }
     printHtml('Route Wise Student Summary', table.outerHTML);
   }
-  async function renderRouteStudentSummary(box, sourceRows, { mode = 'category', routeSource = 'primary', emptyMessage = 'No active students found.' } = {}) {
+  async function renderRouteStudentSummary(box, sourceRows, {
+    mode = 'category',
+    routeSource = 'primary',
+    emptyMessage = 'No active students found.',
+    paginate = false,
+    pageState = assignState,
+    pageKey = 'summaryPage',
+    pageSizeKey = 'summaryPageSize',
+    search = '',
+  } = {}) {
     if (!box) return;
     box.innerHTML = spinner();
     try {
@@ -1108,23 +1219,44 @@
           row.todayRoutes[todayRouteName] += 1;
           row.total += 1;
         });
-        const rows = [...routeMap.values()].sort((a, b) => {
+        let rows = [...routeMap.values()].sort((a, b) => {
           if (a.route === 'Unassigned') return 1;
           if (b.route === 'Unassigned') return -1;
           return a.route.localeCompare(b.route, undefined, { numeric: true, sensitivity: 'base' });
         });
+        const term = String(search || '').trim().toLowerCase();
+        if (term) rows = rows.filter((row) => row.route.toLowerCase().includes(term));
+        if (!rows.length) {
+          box.innerHTML = '<div class="empty">No routes match the search.</div>';
+          return;
+        }
+        const pageSize = Number(pageState[pageSizeKey]) || 10;
+        const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+        if (pageState[pageKey] > totalPages) pageState[pageKey] = totalPages;
+        if (pageState[pageKey] < 1) pageState[pageKey] = 1;
+        const visibleRows = paginate
+          ? rows.slice((pageState[pageKey] - 1) * pageSize, pageState[pageKey] * pageSize)
+          : rows;
         box.innerHTML = `<div class="table-wrap"><table>
           <thead>
             <tr><th rowspan="2">Actual Route</th><th colspan="${todayRoutes.length}">Today's Route</th><th rowspan="2">Total</th></tr>
             <tr>${todayRoutes.map((route) => `<th>${esc(route)}</th>`).join('')}</tr>
           </thead>
-          <tbody>${rows.map((row) => `<tr>
+          <tbody>${visibleRows.map((row) => `<tr>
             <td>${row.route === 'Unassigned' ? '<span class="muted">Unassigned</span>' : badge(row.route, 'blue')}</td>
             ${todayRoutes.map((route) => `<td>${row.todayRoutes[route] || 0}</td>`).join('')}
             <td><b>${row.total}</b></td>
           </tr>`).join('')}</tbody>
           <tfoot><tr><th>Total</th>${todayRoutes.map((route) => `<th>${students.filter((student) => String(todayRoute(student) || 'Unassigned') === route).length}</th>`).join('')}<th>${students.length}</th></tr></tfoot>
-        </table></div>`;
+        </table></div>${paginate ? `<div class="pagination" id="summary-pager">
+          <span class="muted">${rows.length} routes - page ${pageState[pageKey]} of ${totalPages}</span>
+          <button class="btn secondary sm" id="summary-prev" ${pageState[pageKey] <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+          <button class="btn secondary sm" id="summary-next" ${pageState[pageKey] >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+        </div>` : ''}`;
+        if (paginate) {
+          box.querySelector('#summary-prev').addEventListener('click', () => { pageState[pageKey]--; renderRouteStudentSummary(box, sourceRows, { mode, routeSource, emptyMessage, paginate, pageState, pageKey, pageSizeKey, search }); });
+          box.querySelector('#summary-next').addEventListener('click', () => { pageState[pageKey]++; renderRouteStudentSummary(box, sourceRows, { mode, routeSource, emptyMessage, paginate, pageState, pageKey, pageSizeKey, search }); });
+        }
         return;
       }
 
@@ -1144,45 +1276,82 @@
         row.total += 1;
       });
 
-      const rows = [...routeMap.values()].sort((a, b) => {
+      let rows = [...routeMap.values()].sort((a, b) => {
         if (a.route === 'Unassigned') return 1;
         if (b.route === 'Unassigned') return -1;
         return a.route.localeCompare(b.route, undefined, { numeric: true, sensitivity: 'base' });
       });
+      const term = String(search || '').trim().toLowerCase();
+      if (term) rows = rows.filter((row) => row.route.toLowerCase().includes(term));
+      if (!rows.length) {
+        box.innerHTML = '<div class="empty">No routes match the search.</div>';
+        return;
+      }
+      const pageSize = Number(pageState[pageSizeKey]) || 10;
+      const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+      if (pageState[pageKey] > totalPages) pageState[pageKey] = totalPages;
+      if (pageState[pageKey] < 1) pageState[pageKey] = 1;
+      const visibleRows = paginate
+        ? rows.slice((pageState[pageKey] - 1) * pageSize, pageState[pageKey] * pageSize)
+        : rows;
 
       box.innerHTML = `<div class="table-wrap"><table>
         <thead><tr><th>Route</th>${categories.map((category) => `<th>${esc(category)}</th>`).join('')}<th>Total</th></tr></thead>
-        <tbody>${rows.map((row) => `<tr>
+        <tbody>${visibleRows.map((row) => `<tr>
           <td>${row.route === 'Unassigned' ? '<span class="muted">Unassigned</span>' : badge(row.route, 'blue')}</td>
           ${categories.map((category) => `<td>${row.categories[category] || 0}</td>`).join('')}
           <td><b>${row.total}</b></td>
         </tr>`).join('')}</tbody>
         <tfoot><tr><th>Total</th>${categories.map((category) => `<th>${students.filter((student) => String(student.category || 'Uncategorized') === category).length}</th>`).join('')}<th>${students.length}</th></tr></tfoot>
-      </table></div>`;
+      </table></div>${paginate ? `<div class="pagination" id="summary-pager">
+        <span class="muted">${rows.length} routes - page ${pageState[pageKey]} of ${totalPages}</span>
+        <button class="btn secondary sm" id="summary-prev" ${pageState[pageKey] <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+        <button class="btn secondary sm" id="summary-next" ${pageState[pageKey] >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+      </div>` : ''}`;
+      if (paginate) {
+        box.querySelector('#summary-prev').addEventListener('click', () => { pageState[pageKey]--; renderRouteStudentSummary(box, sourceRows, { mode, routeSource, emptyMessage, paginate, pageState, pageKey, pageSizeKey, search }); });
+        box.querySelector('#summary-next').addEventListener('click', () => { pageState[pageKey]++; renderRouteStudentSummary(box, sourceRows, { mode, routeSource, emptyMessage, paginate, pageState, pageKey, pageSizeKey, search }); });
+      }
     } catch (e) {
       box.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
     }
   }
   async function editBusRoute(c, bus, buses) {
     const allRoutes = await API.get('/routes/list');
-    const usedByOtherBus = new Set((buses || [])
-      .filter((b) => b.bus_id !== bus.bus_id && b.route_number)
-      .map((b) => String(b.route_number)));
     const routeOptions = uniqueValues([...allRoutes, bus.route_number]);
     modal({
       title: `Edit Route - ${bus.bus_number}`,
       body: `<form id="bus-route-form">
-        ${field('Route Number', `<select name="route_number" required>
-          <option value="">-- Select Route --</option>
-          ${routeOptions.map((route) => {
-            const disabled = usedByOtherBus.has(String(route)) ? 'disabled' : '';
-            const note = disabled ? ' (already assigned)' : '';
-            return `<option value="${esc(route)}" ${String(route) === String(bus.route_number) ? 'selected' : ''} ${disabled}>${esc(route)}${note}</option>`;
-          }).join('')}
-        </select>`, true)}
+        ${field('Route Number', `<div class="suggest-field">
+          <input name="route_number" id="bus-route-search" value="${esc(bus.route_number || '')}" placeholder="Search route" autocomplete="off" required>
+          <div class="suggest-list hidden" id="bus-route-suggestions"></div>
+        </div>`, true)}
+        <div class="alert info">If the selected route is already assigned to another bus, that bus will become unassigned in Bus Management.</div>
       </form>`,
       footer: `<button class="btn secondary" data-close>Cancel</button><button class="btn" id="save-bus-route">Update Route</button>`,
       onMount: (el, close) => {
+        const routeInput = el.querySelector('#bus-route-search');
+        const suggestions = el.querySelector('#bus-route-suggestions');
+        const renderSuggestions = () => {
+          const term = routeInput.value.trim().toLowerCase();
+          const matches = routeOptions
+            .filter((route) => !term || route.toLowerCase().includes(term))
+            .slice(0, 8);
+          suggestions.innerHTML = matches.length
+            ? matches.map((route) => `<button type="button" class="suggest-item" data-route="${esc(route)}">${esc(route)}</button>`).join('')
+            : '<div class="suggest-empty">No matching routes</div>';
+          suggestions.classList.remove('hidden');
+          suggestions.querySelectorAll('[data-route]').forEach((button) => {
+            button.addEventListener('mousedown', (e) => {
+              e.preventDefault();
+              routeInput.value = button.dataset.route;
+              suggestions.classList.add('hidden');
+            });
+          });
+        };
+        routeInput.addEventListener('focus', renderSuggestions);
+        routeInput.addEventListener('input', renderSuggestions);
+        routeInput.addEventListener('blur', () => setTimeout(() => suggestions.classList.add('hidden'), 120));
         el.querySelector('#save-bus-route').addEventListener('click', async () => {
           const form = el.querySelector('#bus-route-form');
           if (!form.reportValidity()) return;
@@ -1206,16 +1375,27 @@
     await renderRouteStudentSummary(c.querySelector('#route-summary'), rows, {
       mode: 'todayRoute',
       emptyMessage: 'No students shown in Manual Assignment.',
+      paginate: true,
     });
     if (!rows.length) { grid.innerHTML = "<div class=\"empty\">No students found in today's trip list.</div>"; return; }
+    const totalPages = Math.max(1, Math.ceil(rows.length / assignState.assignPageSize));
+    if (assignState.assignPage > totalPages) assignState.assignPage = totalPages;
+    if (assignState.assignPage < 1) assignState.assignPage = 1;
+    const start = (assignState.assignPage - 1) * assignState.assignPageSize;
+    const pageRows = rows.slice(start, start + assignState.assignPageSize);
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th class="checkbox-cell"><input type="checkbox" id="a-all"></th><th>ID</th><th>Name</th><th>Class</th><th>Today's Route (Temporary)</th><th>Actual Route</th></tr></thead>
-      <tbody>${rows.map((s) => `<tr>
+      <tbody>${pageRows.map((s) => `<tr>
         <td class="checkbox-cell"><input type="checkbox" class="a-check" value="${s.student_id}" ${assignState.selected.has(s.student_id) ? 'checked' : ''}></td>
         <td>${esc(s.student_code)}</td><td>${esc(s.name)}</td><td>${esc(s.class || '-')}</td>
         <td>${todayRoute(s) ? badge(todayRoute(s), 'amber') : '<span class="muted">Unassigned</span>'}</td>
         <td>${actualRoute(s) ? badge(actualRoute(s), 'blue') : '<span class="muted">Unassigned</span>'}</td></tr>`).join('')}
-      </tbody></table></div>`;
+      </tbody></table></div>
+      <div class="pagination" id="assign-pager">
+        <span class="muted">${rows.length} students - page ${assignState.assignPage} of ${totalPages}</span>
+        <button class="btn secondary sm" id="assign-prev" ${assignState.assignPage <= 1 ? 'disabled' : ''}>${Icons.svg('chevLeft', 15)} Prev</button>
+        <button class="btn secondary sm" id="assign-next" ${assignState.assignPage >= totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
+      </div>`;
     grid.querySelector('#a-all').addEventListener('change', (e) => {
       grid.querySelectorAll('.a-check').forEach((cb) => { cb.checked = e.target.checked; if (e.target.checked) assignState.selected.add(Number(cb.value)); else assignState.selected.delete(Number(cb.value)); });
       updateAssignBtn(c);
@@ -1223,16 +1403,18 @@
     grid.querySelectorAll('.a-check').forEach((cb) => cb.addEventListener('change', () => {
       if (cb.checked) assignState.selected.add(Number(cb.value)); else assignState.selected.delete(Number(cb.value)); updateAssignBtn(c);
     }));
+    grid.querySelector('#assign-prev').addEventListener('click', () => { assignState.assignPage--; loadAssignStudents(c); });
+    grid.querySelector('#assign-next').addEventListener('click', () => { assignState.assignPage++; loadAssignStudents(c); });
     updateAssignBtn(c);
   }
   async function getManualAssignmentRows(c) {
-    const routes = [...c.querySelectorAll('#a-route-list input:checked')].map((input) => input.value);
+    const routeFilter = c.querySelector('#a-route-filter').value.trim();
     const search = c.querySelector('#a-search').value.trim().toLowerCase();
     const res = await API.get('/trips/today');
     const rows = (res.data || []).filter((s) => {
       const tempRoute = todayRoute(s);
       const primaryRoute = actualRoute(s);
-      const matchesRoute = !routes.length || routes.includes(String(primaryRoute || ''));
+      const matchesRoute = !routeFilter || String(primaryRoute || '') === routeFilter;
       const haystack = [s.student_code, s.name, s.class, s.section, s.category, tempRoute, primaryRoute].join(' ').toLowerCase();
       return matchesRoute && (!search || haystack.includes(search));
     });
@@ -1297,15 +1479,53 @@
         </div>
         <div id="repl-preview"></div>
       </div>
+      <div class="card">
+        <h2>Bus Route Swap / Change</h2>
+        <div class="alert info">Change the route assigned to a bus. If the target route is already assigned to another bus, that bus route will be set to <b>Unassigned</b>.</div>
+        <div class="toolbar">
+          <select id="swap-bus"><option value="">Select bus</option></select>
+          <span style="color:var(--accent)">${Icons.svg('arrowRight', 22)}</span>
+          <span id="swap-route-wrap"></span>
+          <button class="btn" id="btn-swap-route">Update Bus Route</button>
+        </div>
+        <div id="swap-result"></div>
+      </div>
       <div class="card"><h2>Replacement Audit Log</h2><div id="repl-log">${spinner()}</div></div>`;
-    const filters = await API.get('/students/filters');
+    const [filters, busesList, routeList] = await Promise.all([API.get('/students/filters'), API.get('/buses'), API.get('/routes/list')]);
     const routes = filters.routes || [];
     c.querySelector('#old-route-wrap').innerHTML = routeSearchInput('oldRoute', '', filters.routes, 'Existing Route');
     c.querySelector('#old-route-wrap input').id = 'old-route';
     c.querySelector('#new-route-wrap').innerHTML = routeSearchInput('newRoute', '', routes, 'New Route');
     c.querySelector('#new-route-wrap input').id = 'new-route';
+    c.querySelector('#swap-bus').innerHTML = selectOptions((busesList || []).map((bus) => ({
+      value: bus.id,
+      label: `${bus.bus_number}${bus.route_number ? ` - Route ${bus.route_number}` : ' - Unassigned'}`,
+    })), '', { includeBlank: true, blankLabel: 'Select bus' });
+    c.querySelector('#swap-route-wrap').innerHTML = routeSearchInput('swapRoute', '', routeList, 'Target Route');
+    c.querySelector('#swap-route-wrap input').id = 'swap-route';
+    bindRouteSuggests(c);
     c.querySelector('#btn-preview').addEventListener('click', () => previewReplace(c));
+    c.querySelector('#btn-swap-route').addEventListener('click', () => doSwapBusRoute(c));
     await loadReplLog(c);
+  }
+  async function doSwapBusRoute(c) {
+    const busId = c.querySelector('#swap-bus').value;
+    const route = c.querySelector('#swap-route').value.trim();
+    const box = c.querySelector('#swap-result');
+    if (!busId || !route) { toast('Select a bus and target route.', 'warning'); return; }
+    const btn = c.querySelector('#btn-swap-route');
+    btn.disabled = true;
+    box.innerHTML = spinner();
+    try {
+      const r = await API.put(`/routes/bus/${busId}/route`, { route_number: route });
+      const moved = r.unassignedBus ? ` Route was removed from bus ${esc(r.unassignedBus.bus_number)}.` : '';
+      box.innerHTML = `<div class="alert info">Bus route updated to <b>${esc(route)}</b>.${moved}</div>`;
+      toast('Bus route updated.', 'success');
+      await routeReplacement(c);
+    } catch (e) {
+      box.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
+      btn.disabled = false;
+    }
   }
   async function previewReplace(c) {
     const oldR = c.querySelector('#old-route').value;
@@ -1950,6 +2170,8 @@
       try { await API.del(`/settings/roles/${b.dataset.delRole}`); toast('Role deleted.', 'success'); await loadRoles(c); }
       catch (e) { toast(e.message, 'error'); }
     }));
+    box.querySelector('#trip-list-prev').addEventListener('click', () => { tripState.listPage--; loadTripList(c); });
+    box.querySelector('#trip-list-next').addEventListener('click', () => { tripState.listPage++; loadTripList(c); });
   }
 
   async function roleForm(c, role) {

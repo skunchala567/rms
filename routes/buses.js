@@ -15,7 +15,7 @@ router.use(requirePageAccess('buses'));
 const SELECT_WITH_OCCUPANCY = `
   SELECT b.*,
     (SELECT COUNT(*) FROM students s
-       WHERE s.route_number = b.route_number AND s.status = 'Active') AS occupied
+       WHERE b.route_number IS NOT NULL AND s.route_number = b.route_number AND s.status = 'Active') AS occupied
   FROM buses b
 `;
 
@@ -59,8 +59,9 @@ function validateBus(body, { partial = false } = {}) {
     else data.bus_number = busNumber;
   }
   if (!partial || body.route_number !== undefined) {
-    if (!body.route_number || !String(body.route_number).trim()) errors.push('Route Number is required.');
-    else data.route_number = String(body.route_number).trim();
+    const routeNumber = String(body.route_number || '').trim();
+    if (!partial && !routeNumber) errors.push('Route Number is required.');
+    else data.route_number = routeNumber || null;
   }
   if (body.seating_capacity !== undefined) {
     const rawCapacity = String(body.seating_capacity || '').trim();
@@ -93,7 +94,7 @@ async function buildBulkPreview(rows) {
   const seenBusNumbers = new Set();
   const seenRoutes = new Set();
   const existingBuses = new Set((await db.prepare('SELECT bus_number FROM buses').all()).map((r) => String(r.bus_number).toUpperCase()));
-  const existingRoutes = new Map((await db.prepare('SELECT route_number, bus_number FROM buses').all())
+  const existingRoutes = new Map((await db.prepare(`SELECT route_number, bus_number FROM buses WHERE route_number IS NOT NULL AND route_number <> ''`).all())
     .map((r) => [String(r.route_number).toUpperCase(), String(r.bus_number)]));
 
   rows.forEach((row) => {
@@ -214,20 +215,39 @@ router.put('/:id', requirePageAccess('buses'), async (req, res, next) => {
       const dup = await db.prepare('SELECT id FROM buses WHERE bus_number = ? AND id <> ?').get(data.bus_number, bus.id);
       if (dup) return res.status(409).json({ error: `Bus Number "${data.bus_number}" already exists.` });
     }
-    if (data.route_number && data.route_number !== bus.route_number) {
-      const routeDup = await db.prepare('SELECT bus_number FROM buses WHERE route_number = ? AND id <> ?').get(data.route_number, bus.id);
-      if (routeDup) return res.status(409).json({ error: `Route "${data.route_number}" is already selected for bus "${routeDup.bus_number}".` });
-    }
     const m = { ...bus, ...data };
-    await db.prepare(`
-      UPDATE buses SET bus_number=@bus_number, route_number=@route_number, seating_capacity=@seating_capacity,
-        gps_link=@gps_link, driver_name=@driver_name, driver_mobile=@driver_mobile, status=@status,
-        updated_at=NOW()
-      WHERE id=@id
-    `).run({
-      id: bus.id, bus_number: m.bus_number, route_number: m.route_number,
-      seating_capacity: m.seating_capacity || 0, gps_link: m.gps_link || '',
-      driver_name: m.driver_name || '', driver_mobile: m.driver_mobile || '', status: m.status || 'Active',
+    await db.transaction(async (t) => {
+      if (data.route_number && data.route_number !== bus.route_number) {
+        const conflicts = await t.query('SELECT id FROM buses WHERE route_number = ? AND id <> ?', [data.route_number, bus.id]);
+        await t.run('UPDATE buses SET route_number = NULL, updated_at = NOW() WHERE route_number = ? AND id <> ?', [data.route_number, bus.id]);
+        for (const conflict of conflicts) {
+          await t.run('UPDATE trip_assignments SET bus_id = NULL WHERE bus_id = ?', [conflict.id]);
+        }
+      }
+      await t.run(`
+        UPDATE buses SET bus_number=@bus_number, route_number=@route_number, seating_capacity=@seating_capacity,
+          gps_link=@gps_link, driver_name=@driver_name, driver_mobile=@driver_mobile, status=@status,
+          updated_at=NOW()
+        WHERE id=@id
+      `, {
+        id: bus.id, bus_number: m.bus_number, route_number: m.route_number,
+        seating_capacity: m.seating_capacity || 0, gps_link: m.gps_link || '',
+        driver_name: m.driver_name || '', driver_mobile: m.driver_mobile || '', status: m.status || 'Active',
+      });
+      if (data.route_number !== undefined && data.route_number !== bus.route_number) {
+        if (data.route_number) {
+          await t.run('UPDATE trip_assignments SET bus_id = ? WHERE route_number = ?', [bus.id, data.route_number]);
+          await t.run('UPDATE trip_assignments SET route_number = ? WHERE bus_id = ?', [data.route_number, bus.id]);
+          await t.run(`
+            UPDATE students s
+            JOIN trip_assignments t ON t.student_id = s.id
+            SET s.temporary_route_number = ?, s.updated_at = NOW()
+            WHERE t.bus_id = ? AND t.trip_date = CURDATE()
+          `, [data.route_number, bus.id]);
+        } else {
+          await t.run('UPDATE trip_assignments SET bus_id = NULL WHERE bus_id = ?', [bus.id]);
+        }
+      }
     });
     const updated = await db.prepare(`${SELECT_WITH_OCCUPANCY} WHERE b.id = ?`).get(bus.id);
     res.json(decorate(updated));

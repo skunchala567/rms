@@ -421,6 +421,47 @@ button { font-family: inherit; cursor: pointer; }
   height: 15px;
   margin: 0;
 }
+.suggest-field { position: relative; }
+.suggest-list {
+  position: absolute;
+  z-index: 35;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 230px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+.suggest-item {
+  width: 100%;
+  min-height: 36px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ch-700);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+}
+.suggest-item.hidden { display: none; }
+.suggest-item:hover,
+.suggest-item:focus {
+  outline: none;
+  background: var(--surface-2);
+  color: var(--ch-900);
+}
+.suggest-empty {
+  padding: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
 
 /* ---------- Tables ---------- */
 .table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-xs); }

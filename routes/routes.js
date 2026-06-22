@@ -16,7 +16,7 @@ router.get('/occupancy', async (req, res, next) => {
   try {
     const scope = String(req.query.scope || '').toLowerCase();
     const date = String(req.query.date || today());
-    const buses = await db.prepare(`SELECT * FROM buses ORDER BY route_number, bus_number`).all();
+    const buses = await db.prepare(`SELECT * FROM buses ORDER BY route_number IS NULL, route_number, bus_number`).all();
     const studentCounts = scope === 'trip'
       ? await db.prepare(`
           SELECT t.route_number, COUNT(*) AS c
@@ -34,7 +34,7 @@ router.get('/occupancy', async (req, res, next) => {
     studentCounts.forEach((r) => { countMap[r.route_number] = r.c; });
 
     const rows = buses.map((b) => {
-      const occupied = countMap[b.route_number] || 0;
+      const occupied = b.route_number ? (countMap[b.route_number] || 0) : 0;
       return {
         route_number: b.route_number,
         bus_id: b.id,
@@ -48,7 +48,7 @@ router.get('/occupancy', async (req, res, next) => {
       };
     });
 
-    const routesWithBus = new Set(buses.map((b) => b.route_number));
+    const routesWithBus = new Set(buses.map((b) => b.route_number).filter(Boolean));
     Object.keys(countMap).forEach((route) => {
       if (!routesWithBus.has(route)) {
         rows.push({
@@ -66,9 +66,10 @@ router.get('/occupancy', async (req, res, next) => {
 // GET /api/routes/list  -> distinct route numbers from buses + students
 router.get('/list', async (req, res, next) => {
   try {
-    const fromBuses = (await db.prepare(`SELECT DISTINCT route_number FROM buses WHERE route_number <> ''`).all()).map(r => r.route_number);
+    const fromBuses = (await db.prepare(`SELECT DISTINCT route_number FROM buses WHERE route_number IS NOT NULL AND route_number <> ''`).all()).map(r => r.route_number);
     const fromStudents = (await db.prepare(`SELECT DISTINCT route_number FROM students WHERE route_number IS NOT NULL AND route_number <> ''`).all()).map(r => r.route_number);
-    const set = [...new Set([...fromBuses, ...fromStudents])].sort();
+    const fromSettings = (await db.prepare(`SELECT value FROM student_settings WHERE type='route' AND status='Active' AND value <> ''`).all()).map(r => r.value);
+    const set = [...new Set([...fromBuses, ...fromStudents, ...fromSettings])].sort();
     res.json(set);
   } catch (err) { next(err); }
 });
@@ -82,13 +83,25 @@ router.put('/bus/:id/route', requirePageAccess('route-assignment'), async (req, 
     const bus = await db.prepare('SELECT * FROM buses WHERE id = ?').get(req.params.id);
     if (!bus) return res.status(404).json({ error: 'Bus not found.' });
 
-    const conflict = await db.prepare('SELECT id, bus_number FROM buses WHERE route_number = ? AND id <> ?').get(route, bus.id);
-    if (conflict) {
-      return res.status(409).json({ error: `Route "${route}" is already selected for bus "${conflict.bus_number}".` });
-    }
-
-    await db.prepare('UPDATE buses SET route_number = ?, updated_at = NOW() WHERE id = ?').run(route, bus.id);
-    res.json({ ok: true, bus_id: bus.id, route_number: route });
+    let unassignedBus = null;
+    await db.transaction(async (t) => {
+      const conflict = await t.get('SELECT id, bus_number FROM buses WHERE route_number = ? AND id <> ?', [route, bus.id]);
+      if (conflict) {
+        unassignedBus = conflict;
+        await t.run('UPDATE buses SET route_number = NULL, updated_at = NOW() WHERE id = ?', [conflict.id]);
+        await t.run('UPDATE trip_assignments SET bus_id = NULL WHERE bus_id = ?', [conflict.id]);
+      }
+      await t.run('UPDATE buses SET route_number = ?, updated_at = NOW() WHERE id = ?', [route, bus.id]);
+      await t.run('UPDATE trip_assignments SET bus_id = ? WHERE route_number = ?', [bus.id, route]);
+      await t.run('UPDATE trip_assignments SET route_number = ? WHERE bus_id = ?', [route, bus.id]);
+      await t.run(`
+        UPDATE students s
+        JOIN trip_assignments t ON t.student_id = s.id
+        SET s.temporary_route_number = ?, s.updated_at = NOW()
+        WHERE t.bus_id = ? AND t.trip_date = CURDATE()
+      `, [route, bus.id]);
+    });
+    res.json({ ok: true, bus_id: bus.id, route_number: route, unassignedBus });
   } catch (err) { next(err); }
 });
 

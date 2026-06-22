@@ -161,8 +161,36 @@
   }
 
   let shellRendered = false;
+  let lastAccessSig = '';
+  async function refreshSession() {
+    if (!API.getToken()) return false;
+    const res = await API.get('/auth/me');
+    const current = API.getUser() || {};
+    const nextUser = { ...current, ...res.user };
+    const nextSig = JSON.stringify({
+      role: nextUser.role,
+      access: Array.isArray(nextUser.access) ? [...nextUser.access].sort() : [],
+    });
+    API.setSession(API.getToken(), nextUser);
+    const changed = lastAccessSig && lastAccessSig !== nextSig;
+    lastAccessSig = nextSig;
+    return changed;
+  }
+
   async function route() {
     if (!API.getToken()) { shellRendered = false; renderLogin(); return; }
+    try {
+      const accessChanged = await refreshSession();
+      if (accessChanged) shellRendered = false;
+    } catch (e) {
+      if (e.status === 401) {
+        API.clearSession();
+        shellRendered = false;
+        renderLogin();
+        return;
+      }
+      throw e;
+    }
     if (!shellRendered) { renderShell(); shellRendered = true; }
 
     const { path, query } = parseHash();
@@ -198,13 +226,15 @@
 
   function renderApp() { route(); }
   window.addEventListener('hashchange', route);
+  window.addEventListener('focus', () => { if (API.getToken()) route(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && API.getToken()) route();
+  });
 
   async function boot() {
     if (API.getToken()) {
       try {
-        const res = await API.get('/auth/me');
-        const current = API.getUser() || {};
-        API.setSession(API.getToken(), { ...current, ...res.user });
+        await refreshSession();
       } catch (e) {
         if (e.status === 401) API.clearSession();
       }

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS role_permissions (
 CREATE TABLE IF NOT EXISTS buses (
   id               INT AUTO_INCREMENT PRIMARY KEY,
   bus_number       VARCHAR(50) NOT NULL UNIQUE,
-  route_number     VARCHAR(50) NOT NULL,
+  route_number     VARCHAR(50),
   seating_capacity INT NOT NULL DEFAULT 0,
   gps_link         VARCHAR(500),
   driver_name      VARCHAR(150),

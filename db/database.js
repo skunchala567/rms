@@ -191,6 +191,15 @@ async function columnType(table, column) {
   return row ? row.column_type : '';
 }
 
+async function columnNullable(table, column) {
+  const row = await _get(pool, `
+    SELECT IS_NULLABLE AS is_nullable
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
+  `, [table, column]);
+  return row ? String(row.is_nullable || '').toUpperCase() === 'YES' : false;
+}
+
 async function runMigrations() {
   if (await tableExists('users')) {
     const roleType = String(await columnType('users', 'role') || '').toLowerCase();
@@ -203,6 +212,12 @@ async function runMigrations() {
     if (!(await columnType('students', 'temporary_route_number'))) {
       await pool.query('ALTER TABLE students ADD COLUMN temporary_route_number VARCHAR(50) NULL AFTER route_number');
       await pool.query('CREATE INDEX idx_students_temporary_route ON students (temporary_route_number)');
+    }
+  }
+
+  if (await tableExists('buses')) {
+    if (!(await columnNullable('buses', 'route_number'))) {
+      await pool.query('ALTER TABLE buses MODIFY route_number VARCHAR(50) NULL');
     }
   }
 

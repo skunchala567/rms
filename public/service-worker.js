@@ -1,5 +1,5 @@
 /* Service worker - offline caching for the PWA shell + read-only API caching */
-const CACHE = 'sbrms-v36';
+const CACHE = 'sbrms-v40';
 const SHELL = [
   '/',
   '/index.html',
@@ -32,34 +32,23 @@ self.addEventListener('fetch', (e) => {
 
   const url = new URL(request.url);
 
-  // API GET requests: network-first, fall back to cache (offline viewing)
+  // API GET requests: always prefer fresh data and permissions.
   if (url.pathname.startsWith('/api/')) {
-    // Don't cache auth or exports
-    if (url.pathname.startsWith('/api/auth') || url.pathname.includes('/export')) return;
-    e.respondWith(
-      fetch(request)
-        .then((resp) => {
-          const copy = resp.clone();
-          caches.open(CACHE).then((c) => c.put(request, copy));
-          return resp;
-        })
-        .catch(() => caches.match(request))
-    );
+    e.respondWith(fetch(request).catch(() => caches.match(request)));
     return;
   }
 
-  // App shell / static: cache-first
+  // App shell / static: network-first so deployments are visible without manual cache clearing.
   e.respondWith(
-    caches.match(request).then((cached) =>
-      cached ||
-      fetch(request).then((resp) => {
+    fetch(request)
+      .then((resp) => {
         if (resp.ok && (request.destination === 'script' || request.destination === 'style' || request.destination === 'document')) {
           const copy = resp.clone();
           caches.open(CACHE).then((c) => c.put(request, copy));
         }
         return resp;
-      }).catch(() => caches.match('/index.html'))
-    )
+      })
+      .catch(() => caches.match(request).then((cached) => cached || caches.match('/index.html')))
   );
 });
 
