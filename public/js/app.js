@@ -39,9 +39,6 @@
           <div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div>
           <button class="btn" style="width:100%;justify-content:center" id="login-btn">Sign In</button>
         </form>
-        <div class="login-hint">Default logins:<br>
-          <b>admin / admin123</b> (Transport Incharge)<br>
-          <b>dataentry / data123</b> (Data Entry)</div>
       </div></div>`;
     const form = document.getElementById('login-form');
     form.addEventListener('submit', async (e) => {

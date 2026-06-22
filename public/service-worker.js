@@ -1,5 +1,5 @@
 /* Service worker - offline caching for the PWA shell + read-only API caching */
-const CACHE = 'sbrms-v35';
+const CACHE = 'sbrms-v36';
 const SHELL = [
   '/',
   '/index.html',
