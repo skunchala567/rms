@@ -70,6 +70,9 @@ app.use((err, req, res, next) => {
   if (err && err.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ error: 'File too large (max 5 MB).' });
   }
+  if (err && err.code === 'ER_CON_COUNT_ERROR') {
+    return res.status(503).json({ error: 'Database is busy. Please try again in a moment.' });
+  }
   res.status(500).json({ error: 'Internal server error.' });
 });
 

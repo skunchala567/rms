@@ -28,7 +28,7 @@ const cfg = {
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'stayback_routes',
-  connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT, 10) || 10,
+  connectionLimit: 1,
 };
 
 let pool = null;
@@ -112,6 +112,8 @@ async function init() {
   //    run CREATE DATABASE — that's fine. We skip and assume the database was
   //    pre-created in the hosting control panel.
   let admin;
+  const shouldAutoCreate = process.env.DB_AUTO_CREATE === 'true' || ['localhost', '127.0.0.1', '::1'].includes(String(cfg.host).toLowerCase());
+  if (shouldAutoCreate) {
   try {
     admin = await mysql.createConnection({
       host: cfg.host, port: cfg.port, user: cfg.user, password: cfg.password,
@@ -130,6 +132,7 @@ async function init() {
   } finally {
     if (admin) { try { await admin.end(); } catch (_) { /* ignore */ } }
   }
+  }
 
   // 2. Create the pool bound to the database.
   pool = mysql.createPool({
@@ -143,9 +146,21 @@ async function init() {
   pool.on('connection', (conn) => { conn.query("SET time_zone = '+00:00'"); });
 
   // 3. Verify we can actually reach the database, with a friendly diagnosis.
-  try {
-    await pool.query('SELECT 1');
-  } catch (err) {
+  let lastConnectionError = null;
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      await pool.query('SELECT 1');
+      lastConnectionError = null;
+      break;
+    } catch (err) {
+      lastConnectionError = err;
+      if (err.code !== 'ER_CON_COUNT_ERROR' || attempt === 6) break;
+      console.warn(`Database connection limit reached; retrying in 3s (${attempt}/6).`);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
+  if (lastConnectionError) {
+    const err = lastConnectionError;
     const c = err.code || '';
     let hint = '';
     if (c === 'ER_BAD_DB_ERROR') {
