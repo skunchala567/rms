@@ -29,6 +29,15 @@
       </div>
     </div>`;
   }
+  function searchSelectInput({ name, value = '', label = '', items = [], placeholder = 'Search' }) {
+    return `<div class="suggest-field search-select-field">
+      <input type="hidden" id="${esc(name)}" name="${esc(name)}" value="${esc(value || '')}">
+      <input class="search-select-input" value="${esc(label || '')}" placeholder="${esc(placeholder)}" autocomplete="off">
+      <div class="suggest-list hidden">
+        ${(items || []).map((item) => `<button type="button" class="suggest-item" data-value="${esc(item.value || '')}" data-label="${esc(item.label || item.value || '')}">${esc(item.label || item.value || '')}</button>`).join('')}
+      </div>
+    </div>`;
+  }
   function selectOptions(list, selected, { includeBlank = false, blankLabel = 'Select', valueKey = 'value', labelKey = 'label' } = {}) {
     let html = includeBlank ? `<option value="">${esc(blankLabel)}</option>` : '';
     html += (list || []).map((item) => {
@@ -79,6 +88,52 @@
         list.classList.add('hidden');
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
+      }));
+    });
+  }
+  function bindSearchSelects(root, { emptyText = 'No matching options' } = {}) {
+    (root || document).querySelectorAll('.search-select-field').forEach((fieldEl) => {
+      if (fieldEl.dataset.bound) return;
+      fieldEl.dataset.bound = '1';
+      const hidden = fieldEl.querySelector('input[type="hidden"]');
+      const input = fieldEl.querySelector('.search-select-input');
+      const list = fieldEl.querySelector('.suggest-list');
+      const items = [...list.querySelectorAll('[data-value]')];
+      const syncValue = () => {
+        const typed = input.value.trim().toLowerCase();
+        const exact = items.find((item) => item.dataset.label.toLowerCase() === typed);
+        hidden.value = exact ? exact.dataset.value : '';
+        hidden.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const render = () => {
+        const term = input.value.trim().toLowerCase();
+        let shown = 0;
+        items.forEach((item) => {
+          const text = item.dataset.label.toLowerCase();
+          const match = !term || text.includes(term);
+          item.classList.toggle('hidden', !match);
+          if (match) shown += 1;
+        });
+        let empty = list.querySelector('.suggest-empty');
+        if (!shown) {
+          if (!empty) {
+            empty = document.createElement('div');
+            empty.className = 'suggest-empty';
+            empty.textContent = emptyText;
+            list.appendChild(empty);
+          }
+        } else if (empty) empty.remove();
+        list.classList.remove('hidden');
+      };
+      input.addEventListener('focus', render);
+      input.addEventListener('input', () => { syncValue(); render(); });
+      input.addEventListener('blur', () => setTimeout(() => list.classList.add('hidden'), 120));
+      items.forEach((item) => item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        input.value = item.dataset.label;
+        hidden.value = item.dataset.value;
+        list.classList.add('hidden');
+        hidden.dispatchEvent(new Event('change', { bubbles: true }));
       }));
     });
   }
@@ -717,11 +772,7 @@
   async function loadTripStudents(c) {
     const grid = c.querySelector('#trip-grid');
     grid.innerHTML = spinner();
-    const f = tripState.filters;
-    const params = new URLSearchParams({
-      page: tripState.studentPage, pageSize: tripState.studentPageSize, status: 'Active', search: f.search || '', class: f.class || '',
-      section: f.section || '', category: f.category || '', route: f.route || '',
-    });
+    const params = tripStudentParams(tripState.studentPage, tripState.studentPageSize);
     const res = await API.get(`/students?${params}`);
     if (!res.data.length) { grid.innerHTML = '<div class="empty">No matching students.</div>'; return; }
     if (tripState.studentPage > res.totalPages) tripState.studentPage = Number(res.totalPages) || 1;
@@ -740,19 +791,55 @@
         <button class="btn secondary sm" id="trip-student-next" ${res.page >= res.totalPages ? 'disabled' : ''}>Next ${Icons.svg('chevRight', 15)}</button>
       </div>`;
     grid.querySelector('#t-all').addEventListener('change', (e) => {
-      grid.querySelectorAll('.t-check').forEach((cb) => {
-        cb.checked = e.target.checked;
-        if (e.target.checked) tripState.selected.add(Number(cb.value)); else tripState.selected.delete(Number(cb.value));
-      });
-      updateTripBtn(c);
+      selectAllTripStudents(c, Boolean(e.target.checked), Number(res.total) || 0);
     });
     grid.querySelectorAll('.t-check').forEach((cb) => cb.addEventListener('change', () => {
       if (cb.checked) tripState.selected.add(Number(cb.value)); else tripState.selected.delete(Number(cb.value));
       updateTripBtn(c);
+      updateTripSelectAllState(grid);
     }));
     grid.querySelector('#trip-student-prev').addEventListener('click', () => { tripState.studentPage--; loadTripStudents(c); });
     grid.querySelector('#trip-student-next').addEventListener('click', () => { tripState.studentPage++; loadTripStudents(c); });
     updateTripBtn(c);
+    updateTripSelectAllState(grid);
+  }
+  function tripStudentParams(page, pageSize) {
+    const f = tripState.filters;
+    return new URLSearchParams({
+      page, pageSize, status: 'Active', search: f.search || '', class: f.class || '',
+      section: f.section || '', category: f.category || '', route: f.route || '',
+    });
+  }
+  async function selectAllTripStudents(c, checked, total) {
+    const grid = c.querySelector('#trip-grid');
+    const all = grid.querySelector('#t-all');
+    if (all) all.disabled = true;
+    try {
+      const pageSize = Math.max(total, tripState.studentPageSize, 1);
+      const res = await API.get(`/students?${tripStudentParams(1, pageSize)}`);
+      (res.data || []).forEach((student) => {
+        if (checked) tripState.selected.add(Number(student.id));
+        else tripState.selected.delete(Number(student.id));
+      });
+      grid.querySelectorAll('.t-check').forEach((cb) => {
+        cb.checked = checked;
+      });
+      updateTripBtn(c);
+      updateTripSelectAllState(grid);
+    } catch (e) {
+      if (all) all.checked = !checked;
+      toast(e.message, 'error');
+    } finally {
+      if (all) all.disabled = false;
+    }
+  }
+  function updateTripSelectAllState(grid) {
+    const all = grid.querySelector('#t-all');
+    if (!all) return;
+    const boxes = [...grid.querySelectorAll('.t-check')];
+    const checkedCount = boxes.filter((cb) => cb.checked).length;
+    all.checked = boxes.length > 0 && checkedCount === boxes.length;
+    all.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
   }
   function updateTripBtn(c) {
     const b = c.querySelector('#btn-assign-trip');
@@ -1026,10 +1113,12 @@
           label: bus.bus_number || '-',
         }))
         .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' }));
-      c.querySelector('#a-target-wrap').innerHTML = `
-        <select id="a-target" name="route">
-          ${selectOptions(vehicleOptions, '', { includeBlank: true, blankLabel: 'Select vehicle number' })}
-        </select>`;
+      c.querySelector('#a-target-wrap').innerHTML = searchSelectInput({
+        name: 'a-target',
+        items: vehicleOptions,
+        placeholder: 'Select vehicle number',
+      });
+      bindSearchSelects(c.querySelector('#a-target-wrap'), { emptyText: 'No matching vehicles' });
       c.querySelector('#a-route-filter').addEventListener('input', () => {
         assignState.assignPage = 1;
         assignState.summaryPage = 1;
@@ -1483,7 +1572,7 @@
         <h2>Bus Route Swap / Change</h2>
         <div class="alert info">Change the route assigned to a bus. If the target route is already assigned to another bus, that bus route will be set to <b>Unassigned</b>.</div>
         <div class="toolbar">
-          <select id="swap-bus"><option value="">Select bus</option></select>
+          <span id="swap-bus-wrap"></span>
           <span style="color:var(--accent)">${Icons.svg('arrowRight', 22)}</span>
           <span id="swap-route-wrap"></span>
           <button class="btn" id="btn-swap-route">Update Bus Route</button>
@@ -1497,10 +1586,16 @@
     c.querySelector('#old-route-wrap input').id = 'old-route';
     c.querySelector('#new-route-wrap').innerHTML = routeSearchInput('newRoute', '', routes, 'New Route');
     c.querySelector('#new-route-wrap input').id = 'new-route';
-    c.querySelector('#swap-bus').innerHTML = selectOptions((busesList || []).map((bus) => ({
+    const busOptions = (busesList || []).map((bus) => ({
       value: bus.id,
       label: `${bus.bus_number}${bus.route_number ? ` - Route ${bus.route_number}` : ' - Unassigned'}`,
-    })), '', { includeBlank: true, blankLabel: 'Select bus' });
+    }));
+    c.querySelector('#swap-bus-wrap').innerHTML = searchSelectInput({
+      name: 'swap-bus',
+      items: busOptions,
+      placeholder: 'Select bus',
+    });
+    bindSearchSelects(c.querySelector('#swap-bus-wrap'), { emptyText: 'No matching buses' });
     c.querySelector('#swap-route-wrap').innerHTML = routeSearchInput('swapRoute', '', routeList, 'Target Route');
     c.querySelector('#swap-route-wrap input').id = 'swap-route';
     bindRouteSuggests(c);
@@ -1906,11 +2001,15 @@
   }
 
   // ============================ REPORTS ============================
-  const reportState = { whatsappPage: 1, whatsappPageSize: 20, whatsappRows: [], whatsappSearch: '' };
+  const reportState = {
+    dailyRows: [], dailySearch: '',
+    busRows: [], busSearch: '',
+    whatsappPage: 1, whatsappPageSize: 20, whatsappRows: [], whatsappSearch: '',
+  };
   async function reports(c) {
     c.innerHTML = `
       <div class="tabs">
-        <button class="tab active" data-r="daily">${Icons.svg('route', 16)} Daily Route</button>
+        <button class="tab active" data-r="daily">${Icons.svg('route', 16)} Today Route Plan</button>
         <button class="tab" data-r="bus">${Icons.svg('bus', 16)} Bus Occupancy</button>
         <button class="tab" data-r="whatsapp">${Icons.svg('message', 16)} WhatsApp Delivery</button>
       </div>
@@ -1928,20 +2027,97 @@
       <tbody>${rows.map((r) => `<tr>${cols.map((c) => `<td>${esc(r[c.k] != null ? r[c.k] : '-')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
   async function repDaily(content) {
-    content.innerHTML = `<div class="card"><div class="section-head"><h2>Daily Route Report</h2>
-      <button class="btn secondary" id="exp">${Icons.svg('download', 16)} Export</button></div><div id="rt">${spinner()}</div></div>`;
+    content.innerHTML = `<div class="card"><div class="section-head"><h2>Today Route Plan</h2>
+      <button class="btn secondary" id="exp">${Icons.svg('download', 16)} Export</button></div>
+      <div class="toolbar">
+        <span class="input-icon">${Icons.svg('search', 16)}<input id="dr-search" placeholder="Search student / route / bus / category" value="${esc(reportState.dailySearch || '')}"></span>
+        <button class="btn secondary sm" id="dr-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
+      </div>
+      <div id="rt">${spinner()}</div></div>`;
     content.querySelector('#exp').addEventListener('click', () => API.download('/reports/daily-route/export', 'daily-route.xlsx').catch((e) => toast(e.message, 'error')));
+    let t;
+    content.querySelector('#dr-search').addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        reportState.dailySearch = content.querySelector('#dr-search').value.trim();
+        renderDailyReport(content);
+      }, 250);
+    });
+    content.querySelector('#dr-clear').addEventListener('click', () => {
+      content.querySelector('#dr-search').value = '';
+      reportState.dailySearch = '';
+      renderDailyReport(content);
+    });
     const r = await API.get('/reports/daily-route');
-    content.querySelector('#rt').innerHTML = reportTable(
-      [{ h: 'Student Name', k: 'student_name' }, { h: 'Student ID', k: 'student_id' }, { h: "Today's Route", k: 'temporary_route_number' }, { h: 'Actual Route', k: 'actual_route_number' }, { h: 'Bus Number', k: 'bus_number' }, { h: 'Category', k: 'category' }], r.data);
+    reportState.dailyRows = r.data || [];
+    renderDailyReport(content);
+  }
+  function renderDailyReport(content) {
+    const target = content.querySelector('#rt');
+    const rows = reportState.dailyRows || [];
+    if (!rows.length) { target.innerHTML = '<div class="empty">No data.</div>'; return; }
+    const search = String(reportState.dailySearch || '').trim().toLowerCase();
+    const filteredRows = rows.filter((row) => !search || [
+      row.student_name,
+      row.student_id,
+      row.temporary_route_number,
+      row.actual_route_number,
+      row.bus_number,
+      row.category,
+    ].some((value) => String(value || '').toLowerCase().includes(search)));
+    if (!filteredRows.length) {
+      target.innerHTML = '<div class="empty">No daily route rows match the selected filters.</div>';
+      return;
+    }
+    target.innerHTML = reportTable(
+      [{ h: 'Student Name', k: 'student_name' }, { h: 'Student ID', k: 'student_id' }, { h: "Today's Route", k: 'temporary_route_number' }, { h: 'Actual Route', k: 'actual_route_number' }, { h: 'Bus Number', k: 'bus_number' }, { h: 'Category', k: 'category' }],
+      filteredRows);
   }
   async function repBus(content) {
     content.innerHTML = `<div class="card"><div class="section-head"><h2>Bus Occupancy Report</h2>
-      <button class="btn secondary" id="exp">${Icons.svg('download', 16)} Export</button></div><div id="rt">${spinner()}</div></div>`;
+      <button class="btn secondary" id="exp">${Icons.svg('download', 16)} Export</button></div>
+      <div class="toolbar">
+        <span class="input-icon">${Icons.svg('search', 16)}<input id="br-search" placeholder="Search bus / route / occupancy" value="${esc(reportState.busSearch || '')}"></span>
+        <button class="btn secondary sm" id="br-clear" type="button">${Icons.svg('x', 14)} Clear Filters</button>
+      </div>
+      <div id="rt">${spinner()}</div></div>`;
     content.querySelector('#exp').addEventListener('click', () => API.download('/reports/bus-occupancy/export', 'bus-occupancy.xlsx').catch((e) => toast(e.message, 'error')));
+    let t;
+    content.querySelector('#br-search').addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        reportState.busSearch = content.querySelector('#br-search').value.trim();
+        renderBusReport(content);
+      }, 250);
+    });
+    content.querySelector('#br-clear').addEventListener('click', () => {
+      content.querySelector('#br-search').value = '';
+      reportState.busSearch = '';
+      renderBusReport(content);
+    });
     const r = await API.get('/reports/bus-occupancy');
-    content.querySelector('#rt').innerHTML = reportTable(
-      [{ h: 'Bus Number', k: 'bus_number' }, { h: 'Route Number', k: 'route_number' }, { h: 'Capacity', k: 'capacity' }, { h: 'Occupied Today', k: 'occupied' }, { h: 'Available', k: 'available' }], r.data);
+    reportState.busRows = r.data || [];
+    renderBusReport(content);
+  }
+  function renderBusReport(content) {
+    const target = content.querySelector('#rt');
+    const rows = reportState.busRows || [];
+    if (!rows.length) { target.innerHTML = '<div class="empty">No data.</div>'; return; }
+    const search = String(reportState.busSearch || '').trim().toLowerCase();
+    const filteredRows = rows.filter((row) => !search || [
+      row.bus_number,
+      row.route_number,
+      row.capacity,
+      row.occupied,
+      row.available,
+    ].some((value) => String(value || '').toLowerCase().includes(search)));
+    if (!filteredRows.length) {
+      target.innerHTML = '<div class="empty">No bus occupancy rows match the selected filters.</div>';
+      return;
+    }
+    target.innerHTML = reportTable(
+      [{ h: 'Bus Number', k: 'bus_number' }, { h: 'Route Number', k: 'route_number' }, { h: 'Capacity', k: 'capacity' }, { h: 'Occupied Today', k: 'occupied' }, { h: 'Available', k: 'available' }],
+      filteredRows);
   }
   async function repWhatsapp(content) {
     content.innerHTML = `<div class="card"><div class="section-head"><h2>WhatsApp Delivery Report</h2>
@@ -2145,12 +2321,18 @@
       <div id="user-grid">${spinner()}</div></div>`;
     c.querySelector('#btn-add-role').addEventListener('click', () => roleForm(c));
     c.querySelector('#btn-add-user').addEventListener('click', () => userForm(c));
-    await loadRoles(c);
-    await loadUsers(c);
+    await Promise.all([loadRoles(c), loadUsers(c)]);
   }
   async function loadRoles(c) {
     const grid = c.querySelector('#role-grid');
-    const [roles, pages] = await Promise.all([API.get('/settings/roles'), API.get('/settings/pages')]);
+    let roles;
+    let pages;
+    try {
+      [roles, pages] = await Promise.all([API.get('/settings/roles'), API.get('/settings/pages')]);
+    } catch (e) {
+      grid.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
+      return;
+    }
     if (!roles.length) { grid.innerHTML = '<div class="empty">No roles configured.</div>'; return; }
     const pageLabel = Object.fromEntries(pages.map((p) => [p.key, p.label]));
     grid.innerHTML = `<div class="table-wrap"><table>
@@ -2170,8 +2352,6 @@
       try { await API.del(`/settings/roles/${b.dataset.delRole}`); toast('Role deleted.', 'success'); await loadRoles(c); }
       catch (e) { toast(e.message, 'error'); }
     }));
-    box.querySelector('#trip-list-prev').addEventListener('click', () => { tripState.listPage--; loadTripList(c); });
-    box.querySelector('#trip-list-next').addEventListener('click', () => { tripState.listPage++; loadTripList(c); });
   }
 
   async function roleForm(c, role) {
@@ -2217,7 +2397,12 @@
   }
   async function loadUsers(c) {
     const grid = c.querySelector('#user-grid');
-    const list = await API.get('/users');
+    let list;
+    try { list = await API.get('/users'); }
+    catch (e) {
+      grid.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
+      return;
+    }
     const me = API.getUser();
     grid.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
