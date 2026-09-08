@@ -592,3 +592,22 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--charcoal
     box-shadow: var(--shadow-xs);
   }
 }
+
+/* Adhoc transport */
+.transport-public { max-width: 900px; margin: 32px auto; padding: 0 20px 40px; }
+.transport-public h2 { margin: 24px 0 14px; }
+.transport-public p { margin: 12px 0; }
+.transport-map { height: 340px; margin: 16px 0; border: 1px solid #ccc; border-radius: 10px; z-index: 0; }
+.transport-pin { background: #24583d; color: white; border: 2px solid white; border-radius: 50%; text-align: center; line-height: 26px; font-weight: bold; box-shadow: 0 2px 6px #555; }
+.transport-request { padding: 20px 0; border-bottom: 1px solid #ddd; }
+.transport-request p { margin: 8px 0; }
+.transport-reason, .transport-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+.transport-message { padding: 16px; background: #f4f4f4; font: inherit; }
+.transport-success { padding: 30px 10px; }
+#decision-error { color: #a12626; margin: 12px 0; }
+[hidden] { display: none !important; }
+@media (max-width: 600px) { .transport-public { margin-top: 20px; padding: 0 12px 24px; } .transport-map { height: 280px; } }
+#location-search-fields gmp-place-autocomplete { width: 100%; color-scheme: light; }
+#location-search-fields [data-google-search] { margin-top: 8px; }
+#location-search-fields p { overflow-wrap: anywhere; }
+.transport-request a, .transport-public #location-search-fields a { text-decoration: underline; }

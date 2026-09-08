@@ -142,3 +142,56 @@ CREATE TABLE IF NOT EXISTS student_settings (
   UNIQUE KEY uniq_student_setting (type, value),
   INDEX idx_student_settings_type_status (type, status, sort_order)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS transport_requests (
+ id INT AUTO_INCREMENT PRIMARY KEY,
+ reference VARCHAR(40) NOT NULL UNIQUE,
+ submission_key VARCHAR(36) NOT NULL UNIQUE,
+ requestor_name VARCHAR(150) NOT NULL,
+ mobile VARCHAR(30) NOT NULL,
+ subject VARCHAR(200) NOT NULL,
+ reason TEXT NOT NULL,
+ persons INT NOT NULL,
+ origin_name VARCHAR(200) NOT NULL,
+ destination_name VARCHAR(200) NOT NULL,
+ from_lat DECIMAL(10,7) NOT NULL,
+ from_lng DECIMAL(10,7) NOT NULL,
+ to_lat DECIMAL(10,7) NOT NULL,
+ to_lng DECIMAL(10,7) NOT NULL,
+ travel_at DATETIME NOT NULL,
+ end_at DATETIME NOT NULL,
+ trip_type ENUM('Drop','Round trip') NOT NULL,
+ status ENUM('Pending','Accepted','Rejected') NOT NULL DEFAULT 'Pending',
+ bus_id INT,
+ vehicle_number VARCHAR(50),
+ driver_name VARCHAR(150),
+ driver_mobile VARCHAR(30),
+ attender_name VARCHAR(150),
+ attender_mobile VARCHAR(30),
+ rejection_reason TEXT,
+ decided_by INT,
+ decided_at DATETIME,
+ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ INDEX idx_request_status (status, created_at),
+ INDEX idx_request_booking (bus_id, status, travel_at, end_at),
+ CONSTRAINT fk_request_bus FOREIGN KEY (bus_id) REFERENCES buses(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS transport_request_messages (
+ id INT AUTO_INCREMENT PRIMARY KEY,
+ request_id INT NOT NULL UNIQUE,
+ status ENUM('Pending','Sending','Sent','Failed','Simulated') NOT NULL DEFAULT 'Pending',
+ message TEXT,
+ provider_response TEXT,
+ attempts INT NOT NULL DEFAULT 0,
+ updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ CONSTRAINT fk_request_message FOREIGN KEY (request_id) REFERENCES transport_requests(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS google_maps_settings (
+ id TINYINT PRIMARY KEY,
+ browser_key VARCHAR(200) NOT NULL DEFAULT '',
+ enabled TINYINT(1) NOT NULL DEFAULT 0,
+ updated_by INT,
+ updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

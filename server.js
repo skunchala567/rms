@@ -21,8 +21,11 @@ app.use('/api', (req, res, next) => {
   res.setHeader('Expires', '0');
   next();
 });
+// Browser-restricted Maps key only; never return server-side credentials.
+app.get('/api/maps-config', require('./services/maps-config').publicMapsConfig);
 
 // API routes
+app.use('/api/transport-requests', require('./routes/transport-requests'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/students', require('./routes/students'));

@@ -246,3 +246,42 @@ module.exports = {
   DEFAULT_TEMPLATE,
   TEMPLATE_PARAM_KEYS,
 };
+
+// Separate approved campaigns are required for adhoc decisions; never reuse the student campaign.
+const TRANSPORT_CONFIRMATION_TEMPLATE = 'Dear {{requestor}}, your transport request {{reference}} ({{subject}}) is confirmed.\nTravel: {{travel_time}}\nTrip: {{trip_type}}\nFrom: {{origin}}\nDestination: {{destination}}\nPersons: {{persons}}\nVehicle: {{vehicle}}\nDriver: {{driver}}\nAttender: {{attender}}\nPickup map: {{pickup_map}}\nDestination map: {{destination_map}}';
+const TRANSPORT_REJECTION_TEMPLATE = 'Dear {{requestor}}, your transport request {{reference}} ({{subject}}) for {{travel_time}} has been rejected.\nReason: {{reason}}';
+const TRANSPORT_CONFIRMATION_KEYS = ['requestor', 'reference', 'subject', 'travel_time', 'trip_type', 'origin', 'destination', 'persons', 'vehicle', 'driver', 'attender', 'pickup_map', 'destination_map'];
+const TRANSPORT_REJECTION_KEYS = ['requestor', 'reference', 'subject', 'travel_time', 'reason'];
+async function sendTransportRequest(r) {
+  const accepted = r.status === 'Accepted';
+  const vars = {
+    requestor: r.requestor_name, reference: r.reference, subject: r.subject,
+    travel_time: new Date(r.travel_at.replace(' ', 'T') + 'Z').toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' IST',
+    trip_type: r.trip_type, origin: r.origin_name, destination: r.destination_name,
+    persons: String(r.persons), vehicle: r.vehicle_number,
+    driver: `${r.driver_name || ''} / ${r.driver_mobile || ''}`,
+    attender: r.attender_name ? `${r.attender_name} / ${r.attender_mobile}` : 'No attender assigned',
+    pickup_map: `https://www.google.com/maps?q=${r.from_lat},${r.from_lng}`,
+    destination_map: `https://www.google.com/maps?q=${r.to_lat},${r.to_lng}`,
+    reason: r.rejection_reason,
+  };
+  const message = renderTemplate(accepted ? TRANSPORT_CONFIRMATION_TEMPLATE : TRANSPORT_REJECTION_TEMPLATE, vars);
+  const destination = formatNumber(r.mobile);
+  if (!isValidDestination(destination)) return { status: 'Failed', message, response: 'Invalid WhatsApp number.' };
+  if (String(process.env.WHATSAPP_ENABLED).toLowerCase() !== 'true') return { status: 'Simulated', message, response: 'WhatsApp disabled; no message sent.' };
+  const campaignName = accepted ? process.env.SMARTPING_ADHOC_CONFIRMATION_CAMPAIGN : process.env.SMARTPING_ADHOC_REJECTION_CAMPAIGN;
+  if (!apiKey() || !campaignName) return { status: 'Failed', message, response: 'Configure SmartPing API key and the approved adhoc decision campaign.' };
+  try {
+    const result = await postJson(endpoint(), {
+      apiKey: apiKey(), campaignName, destination,
+      userName: process.env.SMARTPING_USERNAME || 'Digital Caampus',
+      templateParams: (accepted ? TRANSPORT_CONFIRMATION_KEYS : TRANSPORT_REJECTION_KEYS).map(key => vars[key] || ''),
+      source: 'adhoc-transport', media: {}, buttons: [], carouselCards: [], location: {}, attributes: {}, paramsFallbackValue: {},
+    });
+    // Keep provider responses out of the UI: they may echo credentials or personal data.
+    return { status: parseProviderResponse(result.statusCode, result.text).ok ? 'Sent' : 'Failed', message, response: `SmartPing HTTP ${result.statusCode}. Sent means accepted by provider, not confirmed delivery.` };
+  } catch (e) {
+    return { status: 'Failed', message, response: e.name === 'AbortError' ? 'Provider timed out. Check provider history before retrying.' : 'Could not contact SmartPing. Check provider history before retrying.' };
+  }
+}
+Object.assign(module.exports, { sendTransportRequest, TRANSPORT_CONFIRMATION_TEMPLATE, TRANSPORT_REJECTION_TEMPLATE, TRANSPORT_CONFIRMATION_KEYS, TRANSPORT_REJECTION_KEYS });

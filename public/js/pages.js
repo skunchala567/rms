@@ -175,6 +175,7 @@
     const s = await API.get('/dashboard/summary');
     c.innerHTML = `
       <div class="section-head"><div><h2>Welcome back</h2><div class="sub">Here's today's stay-back transport overview.</div></div></div>
+      ${API.canManageTransportRequests() ? '<div class="btn-row" style="margin-bottom:16px"><a class="btn secondary" href="#/transport-requests">Review Adhoc Requests</a></div>' : ''}
       <div class="cards">
         ${statCard('Total Students', s.totalStudents, 'students', '')}
         ${statCard('Occupied Buses Today', s.occupiedBusesToday, 'bus', 'amber')}
@@ -2189,12 +2190,13 @@
   async function settings(c) {
     c.innerHTML = `
       <div class="section-head">
-        <div><h2>Settings</h2><div class="sub">Manage student dropdowns, user roles, and access.</div></div>
+        <div><h2>Settings</h2><div class="sub">Manage student dropdowns, user roles, access, and Google Maps.</div></div>
       </div>
       <div class="tabs">
         ${Object.entries(settingMeta).map(([type, meta], idx) =>
           `<button class="tab ${idx === 0 ? 'active' : ''}" data-setting="${type}">${Icons.svg('settings', 16)} ${esc(meta.label)}</button>`
         ).join('')}
+        <button class="tab" data-google-maps>Google Maps</button>
         <button class="tab" data-access="users">${Icons.svg('shield', 16)} Roles & Access</button>
       </div>
       <div id="settings-content">${spinner()}</div>`;
@@ -2208,7 +2210,58 @@
       e.currentTarget.classList.add('active');
       accessManagement(c.querySelector('#settings-content'));
     });
+    c.querySelector('[data-google-maps]').addEventListener('click', (e) => {
+      c.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
+      e.currentTarget.classList.add('active');
+      loadGoogleMapsSettings(c.querySelector('#settings-content'));
+    });
     await loadSettingType(c.querySelector('#settings-content'), 'class');
+  }
+
+  async function loadGoogleMapsSettings(content) {
+    content.innerHTML = spinner();
+    try {
+      const config = await API.get('/settings/google-maps');
+      if (!content.isConnected) return;
+      content.innerHTML = `<div class="card"><h2>Google Maps configuration</h2>
+        <p>Configure location search for pickup and destination on the public transport form.</p>
+        <form id="google-maps-settings-form">
+          <div class="field"><label for="maps-browser-key">Google Maps browser API key</label>
+            <input id="maps-browser-key" name="browserKey" type="password" autocomplete="off" spellcheck="false" maxlength="200" value="${esc(config.browserKey)}" placeholder="Paste your browser API key">
+            <button type="button" class="btn secondary sm" id="maps-show-key" aria-controls="maps-browser-key" aria-pressed="false">Show key</button>
+          </div>
+          <p><label><input type="checkbox" id="maps-enabled" ${config.enabled ? 'checked' : ''}> Enable Google Maps and location search</label></p>
+          <p>Leave disabled until your production key is ready. You can save the key now and enable it later.</p>
+          <div id="maps-save-status" role="status" aria-live="polite">${config.enabled ? 'Enabled' : 'Disabled'} · ${esc(config.source)}</div>
+          <div class="btn-row" style="margin-top:16px"><button class="btn" type="submit">Save Google Maps settings</button>
+            <a class="btn secondary" href="/#/request-transport" target="_blank" rel="noopener">Open public form to test</a></div>
+        </form>
+        <h3 style="margin-top:24px">Production setup</h3>
+        <ol><li>Enable billing, Maps JavaScript API, and Places API (New) in your Google Cloud project.</li>
+          <li>Create a browser key and restrict its websites (HTTP referrers) to your production domain, such as https://your-domain.com/*.</li>
+          <li>Restrict the key to Maps JavaScript API and Places API (New), then paste it above and enable search.</li></ol>
+        <p>This browser key is used on the public form. Use a website-restricted key, not a server secret.</p>
+        <p>Saved settings take priority over the server environment. Changes apply to newly opened or refreshed public forms without a server restart. Saving does not verify Google billing or key restrictions.</p>
+        <a href="https://console.cloud.google.com/google/maps-apis/credentials" target="_blank" rel="noopener">Open Google Maps credentials</a>
+      </div>`;
+      const form = content.querySelector('form');
+      const input = content.querySelector('#maps-browser-key');
+      const enabled = content.querySelector('#maps-enabled');
+      const status = content.querySelector('#maps-save-status');
+      const show = content.querySelector('#maps-show-key');
+      show.onclick = () => { const visible = input.type === 'password'; input.type = visible ? 'text' : 'password'; show.textContent = visible ? 'Hide key' : 'Show key'; show.setAttribute('aria-pressed', String(visible)); };
+      form.onsubmit = async e => {
+        e.preventDefault();
+        const button = form.querySelector('[type="submit"]'); button.disabled = true;
+        try {
+          const saved = await API.put('/settings/google-maps', { browserKey: input.value.trim(), enabled: enabled.checked });
+          input.value = saved.browserKey;
+          status.textContent = `Saved. Google Maps search is ${saved.enabled ? 'enabled' : 'disabled'}. Open or refresh the public form to use these settings.`;
+          toast('Google Maps settings saved.', 'success');
+        } catch (e) { status.textContent = e.message; toast(e.message, 'error'); }
+        finally { button.disabled = false; }
+      };
+    } catch (e) { content.innerHTML = `<div class="alert error">${esc(e.message)}</div>`; }
   }
 
   async function loadSettingType(content, type) {

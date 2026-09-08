@@ -20,6 +20,9 @@
     const u = getUser();
     return u && u.role === 'transport_incharge';
   }
+  function canManageTransportRequests() {
+    return ['admin', 'transport_incharge'].includes(getUser()?.role);
+  }
   function canAccess(page) {
     const u = getUser();
     return !!(u && Array.isArray(u.access) && u.access.includes(page));
@@ -75,7 +78,7 @@
 
   window.API = {
     getToken, getUser, setSession, clearSession, isIncharge, download,
-    canAccess,
+    canAccess, canManageTransportRequests,
     get: (p) => request('GET', p),
     post: (p, b) => request('POST', p, b),
     put: (p, b) => request('PUT', p, b),

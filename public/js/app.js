@@ -8,6 +8,7 @@
     { path: 'students', label: 'Students', icon: 'students', page: 'students' },
     { path: 'trips', label: 'Allocate transport', icon: 'clock', page: 'trips' },
     { path: 'route-assignment', label: 'Route Assignment', icon: 'route', page: 'routeAssignment' },
+    { path: 'transport-requests', label: 'Adhoc Requests', icon: 'bus', page: 'transportRequests', transportRequestsOnly: true },
     { path: 'buses', label: 'Buses', icon: 'bus', page: 'buses' },
     { path: 'route-replacement', label: 'Route Replacement', icon: 'replace', page: 'routeReplacement' },
     { path: 'notifications', label: 'Notifications', icon: 'message', page: 'notifications' },
@@ -25,7 +26,9 @@
 
   function navItemsFor(user) {
     const access = Array.isArray(user.access) ? user.access : [];
-    return NAV.filter((n) => access.includes(n.path));
+    return NAV.filter((n) => n.transportRequestsOnly
+      ? API.canManageTransportRequests()
+      : access.includes(n.path));
   }
 
   function renderLogin() {
@@ -39,6 +42,7 @@
           <div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div>
           <button class="btn" style="width:100%;justify-content:center" id="login-btn">Sign In</button>
         </form>
+        <p><a class="btn secondary" href="#/request-transport">Request adhoc transport — no login needed</a></p>
       </div></div>`;
     const form = document.getElementById('login-form');
     form.addEventListener('submit', async (e) => {
@@ -178,6 +182,7 @@
   }
 
   async function route() {
+    if (parseHash().path === 'request-transport') { shellRendered = false; Pages.publicTransportRequest(appEl); return; }
     if (!API.getToken()) { shellRendered = false; renderLogin(); return; }
     try {
       const accessChanged = await refreshSession();

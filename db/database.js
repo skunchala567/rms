@@ -267,3 +267,6 @@ module.exports = makeApi({ query: (...a) => pool.query(...a) });
 module.exports.init = init;
 module.exports.transaction = transaction;
 module.exports.config = cfg;
+
+// Graceful shutdown for tests and standalone tools.
+module.exports.close = async () => { if (pool) { await pool.end(); pool = null; } };

@@ -93,6 +93,30 @@ function groupOptions(rows) {
   return grouped;
 }
 
+// Google Maps configuration follows the existing Settings permission.
+router.get('/google-maps', requirePageAccess('settings'), async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store').json(await require('../services/maps-config').getMapsSettings());
+  } catch (err) { next(err); }
+});
+router.put('/google-maps', requirePageAccess('settings'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    if (typeof body.browserKey !== 'string' || typeof body.enabled !== 'boolean') {
+      return res.status(400).json({ error: 'Provide a browser key and an enabled setting.' });
+    }
+    const key = body.browserKey.trim();
+    if (key.length > 200 || (key && !/^[A-Za-z0-9_-]+$/.test(key))) {
+      return res.status(400).json({ error: 'Enter the browser API key only, without spaces or a URL.' });
+    }
+    if (body.enabled && !key) return res.status(400).json({ error: 'A browser key is required to enable Google Maps search.' });
+    await db.run(`INSERT INTO google_maps_settings (id, browser_key, enabled, updated_by)
+      VALUES (1, ?, ?, ?) ON DUPLICATE KEY UPDATE browser_key=VALUES(browser_key),
+      enabled=VALUES(enabled), updated_by=VALUES(updated_by), updated_at=NOW()`, [key, body.enabled ? 1 : 0, req.user.id]);
+    res.set('Cache-Control', 'no-store').json(await require('../services/maps-config').getMapsSettings());
+  } catch (err) { next(err); }
+});
+
 // GET /api/settings/student-options
 router.get('/student-options', async (req, res, next) => {
   try {

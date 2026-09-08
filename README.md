@@ -343,3 +343,98 @@ To reset all data and re-seed (development only): `npm run reset-db`.
 - The app uses connection pooling (`DB_CONNECTION_LIMIT`) and runs the DB session in
   UTC. For multi-server deployments, point every instance at the same MySQL server.
 - Restrict the MySQL user's privileges to `DB_NAME` once the database has been created.
+
+## Adhoc transport requests
+
+Open `/#/request-transport` or use **Request adhoc transport** on the login screen.
+No account is required. The form collects requestor name and WhatsApp number,
+subject, detailed reason, passenger count, pickup and destination names, map pins,
+travel time, expected end/return time, and Drop/Round trip. All entered travel times
+are **India Standard Time (Asia/Kolkata)**; the database stores UTC. A reference is
+shown after submission. Retrying the same form submission does not create duplicates.
+
+Admins and Transport Incharges see **Adhoc Requests** in the sidebar and dashboard quick actions.
+They can filter by status, inspect the locations, accept with a vehicle and driver
+(and optional attender), or reject with a required reason. The vehicle comes from
+**Buses**. Driver details are prefilled and can be overridden for this journey.
+Vehicle/staff details are saved with the decision, preserving the notification record.
+
+Availability requires an active vehicle with sufficient seating and no accepted
+adhoc booking overlapping the requested start/end interval. Vehicles with existing
+school trip assignments on any of the journey's IST dates are excluded for the whole
+date because those assignments have no end time. Incharges must also verify regular
+route schedules or other commitments not recorded as bookings. Vehicle allocation
+is serialized in a transaction to prevent two adhoc requests booking the same vehicle.
+
+Decisions create a notification record before contacting SmartPing. **Simulated**
+means no message was sent; **Sent / Accepted by provider** means the provider accepted
+the API request, not confirmed delivery. Failed, pending, simulated, or interrupted
+notifications can be retried from request details. Interrupted sends can be retried
+after two minutes. Check provider history after a timeout before retrying, because
+SmartPing may have accepted a request whose response was lost. There is no automatic
+background retry or delivery receipt webhook in this workflow.
+
+### SmartPing campaign setup
+
+Set `WHATSAPP_ENABLED=true`, `SMARTPING_API_KEY`, and both approved campaign names:
+
+```ini
+SMARTPING_ADHOC_CONFIRMATION_CAMPAIGN=<approved confirmation campaign>
+SMARTPING_ADHOC_REJECTION_CAMPAIGN=<approved rejection campaign>
+```
+
+The actual approved templates must match these positional variables:
+
+- Confirmation: requestor name, reference, subject, travel time (IST), trip type,
+  pickup name, destination name, passenger count, vehicle number, driver name/contact,
+  attender name/contact (or "No attender assigned"), pickup map URL, destination map URL.
+- Rejection: requestor name, reference, subject, travel time (IST), rejection reason.
+
+Readable template text is defined in `services/whatsapp.js` as
+`TRANSPORT_CONFIRMATION_TEMPLATE` and `TRANSPORT_REJECTION_TEMPLATE`.
+Missing live credentials/campaigns produce a failed notification rather than using
+the unrelated student campaign. Enabling these variables can send real messages.
+
+The public map uses locally bundled [Leaflet 1.9.4](https://leafletjs.com/examples/quick-start/)
+and online OpenStreetMap tiles when Google Maps is not configured. Coordinates are hidden on the public form and saved with the request. Admin location names open the saved pins in Google Maps.
+The public link must use a publicly reachable deployment for off-network requestors;
+a localhost link only works on the computer running the app.
+
+### Verification
+
+`node --test tests/transport-requests.test.js` creates a uniquely named temporary
+MySQL database using the configured server credentials, runs API/transaction checks
+with WhatsApp disabled, then removes only that test database. The test database
+requires CREATE/DROP privileges. It does not seed or modify application records.
+Public submissions are limited to 20 attempts per IP/hour per server process.
+For multiple app instances, enforce a shared rate limit at the reverse proxy.
+
+
+### Google Maps pickup and destination search
+
+Open **Settings → Google Maps**, enter the browser API key, enable Google Maps,
+and save. Changes are stored in the database and apply to newly opened or refreshed
+public forms without a server restart. You can save a key with search disabled until
+production is ready. The screen includes production setup instructions and a link
+to open the public form for testing. Users need Settings access to edit this configuration.
+
+`GOOGLE_MAPS_BROWSER_KEY` in `.env` remains a fallback until Settings is first saved.
+After that, saved settings take priority, including an explicitly disabled or empty
+configuration. Google Maps provides separate Places search boxes for pickup and destination.
+Enable **Maps JavaScript API** and **Places API (New)** with billing in the Google
+Cloud project. Use a dedicated browser key restricted to the application's HTTP
+referrers (including localhost for development) and these APIs. This key is public
+by design via `/api/maps-config`; do not use a server-side secret key here.
+
+Selecting a suggestion fills the location name, places a draggable pin, and saves
+coordinates in hidden form fields. The public form requires both selected locations.
+Admin request lists and details show clickable location names opening the stored
+coordinates in Google Maps, including for previously submitted requests.
+
+Without a configured key, the two search fields open Google Maps in another tab;
+requestors must then select the matching pins on the form's map. This fallback does
+not import a selection from the other tab. With a configured key, Places suggestions
+select coordinates directly in the form.
+
+References: [Google Places widget](https://developers.google.com/maps/documentation/javascript/place-autocomplete-new)
+and [Google Maps URLs](https://developers.google.com/maps/documentation/urls/get-started).
