@@ -29,10 +29,10 @@
       </div>
     </div>`;
   }
-  function searchSelectInput({ name, value = '', label = '', items = [], placeholder = 'Search' }) {
+  function searchSelectInput({ name, value = '', label = '', items = [], placeholder = 'Search', inputId = '', required = false }) {
     return `<div class="suggest-field search-select-field">
       <input type="hidden" id="${esc(name)}" name="${esc(name)}" value="${esc(value || '')}">
-      <input class="search-select-input" value="${esc(label || '')}" placeholder="${esc(placeholder)}" autocomplete="off">
+      <input class="search-select-input" ${inputId ? `id="${esc(inputId)}"` : ''} ${required ? 'required' : ''} value="${esc(label || '')}" placeholder="${esc(placeholder)}" autocomplete="off">
       <div class="suggest-list hidden">
         ${(items || []).map((item) => `<button type="button" class="suggest-item" data-value="${esc(item.value || '')}" data-label="${esc(item.label || item.value || '')}">${esc(item.label || item.value || '')}</button>`).join('')}
       </div>
@@ -2196,26 +2196,34 @@
         ${Object.entries(settingMeta).map(([type, meta], idx) =>
           `<button class="tab ${idx === 0 ? 'active' : ''}" data-setting="${type}">${Icons.svg('settings', 16)} ${esc(meta.label)}</button>`
         ).join('')}
+        <button class="tab" data-whatsapp>WhatsApp</button>
         <button class="tab" data-google-maps>Google Maps</button>
         <button class="tab" data-access="users">${Icons.svg('shield', 16)} Roles & Access</button>
       </div>
       <div id="settings-content">${spinner()}</div>`;
-    c.querySelectorAll('[data-setting]').forEach((tab) => tab.addEventListener('click', () => {
-      c.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
-      tab.classList.add('active');
-      loadSettingType(c.querySelector('#settings-content'), tab.dataset.setting);
+    async function selectTab(tab, loader) {
+      c.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === tab));
+      // Each selection owns its panel. Late responses can only update a detached panel.
+      const panel = document.createElement('div');
+      c.querySelector('#settings-content').replaceChildren(panel);
+      try { await loader(panel); }
+      catch (e) {
+        if (panel.isConnected) panel.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
+      }
+    }
+    c.querySelectorAll('[data-setting]').forEach(tab => tab.addEventListener('click', () => {
+      selectTab(tab, panel => loadSettingType(panel, tab.dataset.setting));
     }));
-    c.querySelector('[data-access]').addEventListener('click', (e) => {
-      c.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
-      e.currentTarget.classList.add('active');
-      accessManagement(c.querySelector('#settings-content'));
+    c.querySelector('[data-access]').addEventListener('click', e => {
+      selectTab(e.currentTarget, accessManagement);
     });
-    c.querySelector('[data-google-maps]').addEventListener('click', (e) => {
-      c.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
-      e.currentTarget.classList.add('active');
-      loadGoogleMapsSettings(c.querySelector('#settings-content'));
+    c.querySelector('[data-whatsapp]').addEventListener('click', e => {
+      selectTab(e.currentTarget, Pages.whatsappSettings);
     });
-    await loadSettingType(c.querySelector('#settings-content'), 'class');
+    c.querySelector('[data-google-maps]').addEventListener('click', e => {
+      selectTab(e.currentTarget, loadGoogleMapsSettings);
+    });
+    await selectTab(c.querySelector('[data-setting="class"]'), panel => loadSettingType(panel, 'class'));
   }
 
   async function loadGoogleMapsSettings(content) {
@@ -2525,4 +2533,6 @@
     dashboard, students, trips, buses, routeAssignment, routeReplacement,
     notifications, reports, settings, account,
   };
+  // Shared form widgets for modules that render their own screens (e.g. transport requests).
+  window.Forms = { searchSelectInput, bindSearchSelects };
 })();

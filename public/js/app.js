@@ -231,9 +231,20 @@
 
   function renderApp() { route(); }
   window.addEventListener('hashchange', route);
-  window.addEventListener('focus', () => { if (API.getToken()) route(); });
+  let focusRefresh = null;
+  function refreshOnReturn() {
+    if (!API.getToken() || focusRefresh) return;
+    // Check permissions without rebuilding the current form or resetting its selected tab.
+    focusRefresh = refreshSession().then(changed => {
+      if (changed) { shellRendered = false; return route(); }
+    }).catch(e => {
+      if (e.status === 401) return route();
+      toast(e.message, 'error');
+    }).finally(() => { focusRefresh = null; });
+  }
+  window.addEventListener('focus', refreshOnReturn);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && API.getToken()) route();
+    if (!document.hidden) refreshOnReturn();
   });
 
   async function boot() {

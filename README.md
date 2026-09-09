@@ -438,3 +438,22 @@ select coordinates directly in the form.
 
 References: [Google Places widget](https://developers.google.com/maps/documentation/javascript/place-autocomplete-new)
 and [Google Maps URLs](https://developers.google.com/maps/documentation/urls/get-started).
+
+### WhatsApp configuration in Settings
+
+Open **Settings → WhatsApp** to save the SmartPing API key, sender/user name,
+country code, fallback contact number, source, and three approved campaign names:
+student allocation, adhoc confirmation, and adhoc rejection. Each campaign shows
+its ordered variables. Template wording and approval remain in SmartPing.
+
+Saving does not send a message. Enable live sending only when all campaigns are
+ready. Blank API key input preserves the saved credential; the removal checkbox
+clears it. Credentials are stored server-side in the database and never returned
+by the settings API. Settings permission is required for reading or changing this
+configuration. The provider endpoint is fixed to SmartPing for UI-saved settings.
+
+Saved configuration overrides environment defaults for all send/retry flows,
+including an explicit disabled setting, without restarting. Before the first save,
+existing SMARTPING_* and WHATSAPP_ENABLED environment settings continue to apply.
+Disabled student notifications retain the existing simulated Sent log status;
+adhoc notifications use Simulated. No delivery is attempted in either case.

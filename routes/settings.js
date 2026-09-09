@@ -93,6 +93,21 @@ function groupOptions(rows) {
   return grouped;
 }
 
+router.get('/whatsapp', requirePageAccess('settings'), async (req, res, next) => {
+  try {
+    const config = require('../services/whatsapp-config');
+    res.set('Cache-Control', 'no-store').json(config.publicConfig(await config.getConfig()));
+  } catch (err) { next(err); }
+});
+router.put('/whatsapp', requirePageAccess('settings'), async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store').json(await require('../services/whatsapp-config').saveConfig(req.body, req.user.id));
+  } catch (err) {
+    if (!err.code) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
 // Google Maps configuration follows the existing Settings permission.
 router.get('/google-maps', requirePageAccess('settings'), async (req, res, next) => {
   try {

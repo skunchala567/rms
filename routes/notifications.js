@@ -80,7 +80,7 @@ router.get('/preview', async (req, res, next) => {
         reason: !mobileReady ? 'Invalid or missing mobile number' : (!bus ? 'No active bus for route' : ''),
       });
     }
-    res.json({ enabled: whatsapp.isEnabled(), count: data.length, data });
+    res.json({ enabled: (await whatsapp.isEnabled()), count: data.length, data });
   } catch (err) { next(err); }
 });
 
@@ -121,7 +121,7 @@ router.post('/send', requirePageAccess('notifications'), async (req, res, next) 
 
     const sent = results.filter((r) => r.status === 'Sent').length;
     const failed = results.filter((r) => r.status === 'Failed').length;
-    res.json({ ok: true, total: results.length, sent, failed, results, simulated: !whatsapp.isEnabled() });
+    res.json({ ok: true, total: results.length, sent, failed, results, simulated: !(await whatsapp.isEnabled()) });
   } catch (err) { next(err); }
 });
 

@@ -1,5 +1,6 @@
 'use strict';
 
+const { getConfig } = require('./whatsapp-config');
 const http = require('http');
 const https = require('https');
 
@@ -35,24 +36,17 @@ function renderTemplate(template, vars) {
   );
 }
 
-function apiKey() {
-  return process.env.SMARTPING_API_KEY || process.env.SMARTPING_AUTH_TOKEN || '';
+async function isEnabled() {
+  const config = await getConfig();
+  return config.enabled && !!config.apiKey;
 }
 
-function endpoint() {
-  return process.env.SMARTPING_API_URL || DEFAULT_ENDPOINT;
-}
-
-function isEnabled() {
-  return String(process.env.WHATSAPP_ENABLED || '').trim().toLowerCase() === 'true' && !!apiKey();
-}
-
-function formatNumber(mobile) {
+function formatNumber(mobile, countryCode = process.env.SMARTPING_COUNTRY_CODE || '') {
   let n = String(mobile || '').replace(/\D/g, '');
   if (n.startsWith('00')) n = n.slice(2);
   if (n.length === 11 && n.startsWith('0')) n = n.slice(1);
 
-  const cc = String(process.env.SMARTPING_COUNTRY_CODE || '').replace(/\D/g, '');
+  const cc = String(countryCode).replace(/\D/g, '');
   if (cc) {
     if (n.length === 10) n = cc + n;
     if (n.length === cc.length + 11 && n.startsWith(`${cc}0`)) n = cc + n.slice(cc.length + 1);
@@ -174,8 +168,9 @@ async function postJson(url, payload) {
 }
 
 async function sendOne({ mobile, studentName, busNumber, trackingLink, contactNo, template }) {
-  const contact = contactNo || process.env.SMARTPING_CONTACT_NO || '';
-  const destination = formatNumber(mobile);
+  const config = await getConfig();
+  const contact = contactNo || config.contactNo || '';
+  const destination = formatNumber(mobile, config.countryCode);
   const vars = {
     student_name: studentName || '',
     bus_number: busNumber || '',
@@ -195,21 +190,22 @@ async function sendOne({ mobile, studentName, busNumber, trackingLink, contactNo
     };
   }
 
-  if (!isEnabled()) {
+  if (!config.enabled) {
     return {
       status: 'Sent',
       message,
-      response: 'SIMULATED (WhatsApp disabled). Set WHATSAPP_ENABLED=true and SMARTPING_API_KEY to send for real.',
+      response: 'SIMULATED (WhatsApp disabled). Enable live sending in Settings → WhatsApp to send for real.',
     };
   }
 
+  if (!config.apiKey || !config.studentCampaign) return { status: 'Failed', message, response: 'Configure the API key and student allocation campaign in Settings → WhatsApp.' };
   const payload = {
-    apiKey: apiKey(),
-    campaignName: process.env.SMARTPING_CAMPAIGN_NAME || 'staybacktransport',
+    apiKey: config.apiKey,
+    campaignName: config.studentCampaign,
     destination,
-    userName: process.env.SMARTPING_USERNAME || 'Digital Caampus',
+    userName: config.userName,
     templateParams: templateParams(vars),
-    source: process.env.SMARTPING_SOURCE || 'stay-back-route-management',
+    source: config.source,
     media: {},
     buttons: [],
     carouselCards: [],
@@ -219,13 +215,13 @@ async function sendOne({ mobile, studentName, busNumber, trackingLink, contactNo
   };
 
   try {
-    const resp = await postJson(endpoint(), payload);
+    const resp = await postJson(config.endpoint, payload);
     const provider = parseProviderResponse(resp.statusCode, resp.text);
 
     return {
       status: provider.ok ? 'Sent' : 'Failed',
       message,
-      response: responseSummary(resp.statusCode, resp.text),
+      response: `SmartPing HTTP ${resp.statusCode}. Accepted by provider does not confirm delivery.`,
     };
   } catch (err) {
     const reason = err && err.name === 'AbortError'
@@ -253,6 +249,7 @@ const TRANSPORT_REJECTION_TEMPLATE = 'Dear {{requestor}}, your transport request
 const TRANSPORT_CONFIRMATION_KEYS = ['requestor', 'reference', 'subject', 'travel_time', 'trip_type', 'origin', 'destination', 'persons', 'vehicle', 'driver', 'attender', 'pickup_map', 'destination_map'];
 const TRANSPORT_REJECTION_KEYS = ['requestor', 'reference', 'subject', 'travel_time', 'reason'];
 async function sendTransportRequest(r) {
+  const config = await getConfig();
   const accepted = r.status === 'Accepted';
   const vars = {
     requestor: r.requestor_name, reference: r.reference, subject: r.subject,
@@ -266,15 +263,15 @@ async function sendTransportRequest(r) {
     reason: r.rejection_reason,
   };
   const message = renderTemplate(accepted ? TRANSPORT_CONFIRMATION_TEMPLATE : TRANSPORT_REJECTION_TEMPLATE, vars);
-  const destination = formatNumber(r.mobile);
+  const destination = formatNumber(r.mobile, config.countryCode);
   if (!isValidDestination(destination)) return { status: 'Failed', message, response: 'Invalid WhatsApp number.' };
-  if (String(process.env.WHATSAPP_ENABLED).toLowerCase() !== 'true') return { status: 'Simulated', message, response: 'WhatsApp disabled; no message sent.' };
-  const campaignName = accepted ? process.env.SMARTPING_ADHOC_CONFIRMATION_CAMPAIGN : process.env.SMARTPING_ADHOC_REJECTION_CAMPAIGN;
-  if (!apiKey() || !campaignName) return { status: 'Failed', message, response: 'Configure SmartPing API key and the approved adhoc decision campaign.' };
+  if (!config.enabled) return { status: 'Simulated', message, response: 'WhatsApp disabled; no message sent.' };
+  const campaignName = accepted ? config.confirmationCampaign : config.rejectionCampaign;
+  if (!config.apiKey || !campaignName) return { status: 'Failed', message, response: 'Configure SmartPing API key and the approved adhoc decision campaign.' };
   try {
-    const result = await postJson(endpoint(), {
-      apiKey: apiKey(), campaignName, destination,
-      userName: process.env.SMARTPING_USERNAME || 'Digital Caampus',
+    const result = await postJson(config.endpoint, {
+      apiKey: config.apiKey, campaignName, destination,
+      userName: config.userName,
       templateParams: (accepted ? TRANSPORT_CONFIRMATION_KEYS : TRANSPORT_REJECTION_KEYS).map(key => vars[key] || ''),
       source: 'adhoc-transport', media: {}, buttons: [], carouselCards: [], location: {}, attributes: {}, paramsFallbackValue: {},
     });

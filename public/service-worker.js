@@ -1,5 +1,5 @@
 /* Service worker - offline caching for the PWA shell + read-only API caching */
-const CACHE = 'sbrms-v49';
+const CACHE = 'sbrms-v60';
 const SHELL = [
   '/',
   '/index.html',
@@ -9,6 +9,7 @@ const SHELL = [
   '/js/ui.js',
   '/js/pages.js',
   '/js/app.js',
+  '/js/whatsapp-settings.js',
   '/js/transport-requests.js',
   '/js/transport-location-picker.js',
   '/manifest.json',
@@ -36,7 +37,7 @@ self.addEventListener('fetch', (e) => {
 
   // API GET requests: always prefer fresh data and permissions.
   if (url.pathname.startsWith('/api/')) {
-    if (url.pathname === '/api/settings/google-maps' || url.pathname === '/api/maps-config' || url.pathname.startsWith('/api/transport-requests') || url.pathname.startsWith('/api/auth') || url.pathname.includes('/export')) return;
+    if (url.pathname === '/api/settings/whatsapp' || url.pathname === '/api/settings/google-maps' || url.pathname === '/api/maps-config' || url.pathname.startsWith('/api/transport-requests') || url.pathname.startsWith('/api/auth') || url.pathname.includes('/export')) return;
     e.respondWith(fetch(request).catch(() => caches.match(request)));
     return;
   }

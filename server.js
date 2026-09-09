@@ -80,11 +80,12 @@ app.use((err, req, res, next) => {
 });
 
 db.init()
-  .then(() => {
+  .then(async () => {
+    const whatsappEnabled = await require('./services/whatsapp').isEnabled();
     app.listen(PORT, () => {
       console.log(`\nStay Back Route Management System running at http://localhost:${PORT}`);
       console.log(`Database: MySQL "${db.config.database}" @ ${db.config.host}:${db.config.port}`);
-      console.log(`WhatsApp sending: ${require('./services/whatsapp').isEnabled() ? 'LIVE (SmartPing)' : 'SIMULATION (disabled)'}\n`);
+      console.log(`WhatsApp sending: ${whatsappEnabled ? 'LIVE (SmartPing)' : 'SIMULATION (disabled)'}\n`);
     });
   })
   .catch((err) => {

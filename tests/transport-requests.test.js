@@ -55,6 +55,9 @@ test('anonymous submission validates coordinates, dates, capacity and contact; r
   const p = payload(); const first = await request('/', 'POST', p); const second = await request('/', 'POST', p);
   assert.equal(first.body.reference, second.body.reference);
   assert.equal((await db.get('SELECT COUNT(*) AS n FROM transport_requests WHERE submission_key=?', [p.submission_key])).n, 1);
+  // References run as a zero-padded four-digit sequence from 0001.
+  assert.equal(first.body.reference, '0001');
+  assert.equal((await request('/', 'POST', payload())).body.reference, '0002');
 });
 test('private requests and decisions are restricted to incharges and admins', async () => {
   assert.equal((await request('/')).status, 401);
@@ -152,4 +155,29 @@ test('Google Maps settings persist, enforce Settings access, and override enviro
   } finally {
     if (previous === undefined) delete process.env.GOOGLE_MAPS_BROWSER_KEY; else process.env.GOOGLE_MAPS_BROWSER_KEY = previous;
   }
+});
+test('WhatsApp settings protect credentials and drive all three send flows without restart', async () => {
+  const settings = { enabled: false, apiKey: 'test-private-key', studentCampaign: 'student-config', confirmationCampaign: 'confirm-config', rejectionCampaign: 'reject-config', userName: 'School', countryCode: '91', contactNo: '9876543210', source: 'school-rms' };
+  assert.equal((await request('/settings/whatsapp')).status, 401);
+  assert.equal((await request('/settings/whatsapp', 'PUT', settings, entry)).status, 403);
+  assert.equal((await request('/settings/whatsapp', 'PUT', { ...settings, enabled: true, rejectionCampaign: '' }, administrator)).status, 400);
+  const saved = await request('/settings/whatsapp', 'PUT', settings, administrator);
+  assert.equal(saved.status, 200); assert.equal(saved.body.hasApiKey, true); assert.equal(saved.body.apiKey, undefined);
+  assert.equal((await request('/settings/whatsapp', 'GET', undefined, administrator)).body.apiKey, undefined);
+  assert.equal((await request('/settings/whatsapp', 'PUT', { ...settings, enabled: true, apiKey: '' }, administrator)).status, 200);
+  const config = await require('../services/whatsapp-config').getConfig(); assert.equal(config.apiKey, 'test-private-key');
+  assert.equal(await wa.isEnabled(), true);
+  const originalFetch = global.fetch; const sent = [];
+  global.fetch = async (url, opts) => { assert.equal(url, 'https://backend.api-wa.co/campaign/smartpingbsp/api/v2'); sent.push(JSON.parse(opts.body)); return { status: 200, text: async () => '{"success":true}' }; };
+  try {
+    assert.equal((await wa.sendOne({ mobile: '9876543210', studentName: 'Student', busNumber: 'B1' })).status, 'Sent');
+    const r = { ...payload(), mobile: '9876543210', travel_at: '2090-01-01 04:30:00', reference: 'TEST', status: 'Accepted', vehicle_number: 'B1', driver_name: 'Driver', driver_mobile: '9876543210' };
+    assert.equal((await wa.sendTransportRequest(r)).status, 'Sent');
+    assert.equal((await wa.sendTransportRequest({ ...r, status: 'Rejected', rejection_reason: 'Unavailable' })).status, 'Sent');
+    assert.deepEqual(sent.map(p => p.campaignName), ['student-config','confirm-config','reject-config']);
+    assert.ok(sent.every(p => p.apiKey === 'test-private-key' && p.destination === '919876543210' && p.userName === 'School'));
+  } finally { global.fetch = originalFetch; }
+  await request('/settings/whatsapp', 'PUT', { ...settings, apiKey: '', enabled: false, clearApiKey: true }, administrator);
+  assert.equal(await wa.isEnabled(), false);
+  assert.equal((await request('/settings/whatsapp', 'GET', undefined, administrator)).body.hasApiKey, false);
 });
