@@ -1,0 +1,294 @@
+name: Deploy
+
+# Stay Back Route Management System -> rms.k-innovative.com
+#
+# A single Node process (Express API + static PWA) behind nginx, kept alive by
+# pm2 on an EC2 instance. There is no build step; deploying means getting the
+# new commit onto the box and restarting the process.
+#
+#   push to main
+#     -> test against a real MySQL
+#     -> wait for approval on the "production" environment
+#     -> AWS SSM tells the instance to fetch the commit, install, reload, verify
+#
+# Connectivity is AWS SSM Send Command, not SSH: the runner never opens a
+# connection to the instance, so no inbound port 22 and no security-group change
+# is needed. Auth is GitHub OIDC -> IAM role, so there are no long-lived keys.
+#
+# ---------------------------------------------------------------------------
+# ONE-TIME SETUP
+#
+# 1. On the instance (already true for Ubuntu AMIs, verify):
+#      sudo snap services amazon-ssm-agent          # agent running
+#    Attach an IAM instance profile containing the AWS managed policy
+#    AmazonSSMManagedInstanceCore, then confirm the node registers:
+#      aws ssm describe-instance-information --query "InstanceInformationList[].InstanceId"
+#
+# 2. In IAM, create a GitHub OIDC provider (token.actions.githubusercontent.com)
+#    and a role trusted by this repo only, e.g. condition
+#      token.actions.githubusercontent.com:sub = repo:skunchala567/rms:*
+#    Grant it: ssm:SendCommand, ssm:GetCommandInvocation,
+#              ssm:ListCommandInvocations, ssm:DescribeInstanceInformation
+#    (scope SendCommand to this instance ARN and the AWS-RunShellScript document;
+#     DescribeInstanceInformation does not support resource-level permissions,
+#     so it must be granted on "*").
+#
+# 3. Repository VARIABLES (Settings -> Secrets and variables -> Actions):
+#      AWS_REGION        the instance's region, e.g. ap-south-1
+#      EC2_INSTANCE_ID   i-xxxxxxxxxxxx
+#    Optional overrides - the defaults below already match this server:
+#      DEPLOY_USER (ubuntu)  APP_DIR (/var/www/rms)
+#      PM2_APP_NAME (route-mgmt)  APP_PORT (3000)
+#      APP_URL (https://rms.k-innovative.com)  DEPLOY_BRANCH (main)
+#
+# 4. Repository SECRET:
+#      AWS_DEPLOY_ROLE_ARN   arn:aws:iam::<account>:role/<role from step 2>
+#
+# 5. Settings -> Environments -> "production": add required reviewers so every
+#    deploy waits for a manual approval.
+#
+# NOTE: the instance keeps its own .env (gitignored), so any NEW environment
+# variable must be added there by hand - a deploy will never carry it over.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time; queue rather than cancel so a reload is never abandoned.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-password"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # tests/transport-requests.test.js creates a throwaway database per run and
+      # drops it in after(), so it needs CREATE/DROP DATABASE rights.
+      - name: Run tests
+        run: node --test tests/
+        env:
+          NODE_ENV: test
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_USER: root
+          DB_PASSWORD: ci-root-password
+          DB_AUTO_CREATE: 'true'
+          JWT_SECRET: ci-only-secret-never-used-in-production
+          WHATSAPP_ENABLED: 'false'
+
+  deploy:
+    name: Deploy to EC2
+    needs: test
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+      url: ${{ vars.APP_URL || 'https://rms.k-innovative.com' }}
+
+    permissions:
+      contents: read
+      id-token: write # OIDC
+
+    env:
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'ubuntu' }}
+      APP_DIR: ${{ vars.APP_DIR || '/var/www/rms' }}
+      PM2_APP_NAME: ${{ vars.PM2_APP_NAME || 'route-mgmt' }}
+      APP_PORT: ${{ vars.APP_PORT || '3000' }}
+      DEPLOY_BRANCH: ${{ vars.DEPLOY_BRANCH || 'main' }}
+      INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+
+    steps:
+      - name: Check deployment configuration
+        run: |
+          test -n "$INSTANCE_ID" || { echo "::error::Repository variable EC2_INSTANCE_ID is not set."; exit 1; }
+          echo "Deploying ${GITHUB_SHA::7} to $INSTANCE_ID:$APP_DIR (pm2 $PM2_APP_NAME)"
+
+      - name: Authenticate to AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-deploy-${{ github.run_id }}
+
+      - name: Confirm the instance is a managed SSM node
+        run: |
+          state=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+            --query 'InstanceInformationList[0].PingStatus' --output text)
+          echo "SSM ping status: $state"
+          if [ "$state" != "Online" ]; then
+            echo "::error::$INSTANCE_ID is not an Online SSM managed node. Check the SSM agent and its IAM instance profile."
+            exit 1
+          fi
+
+      # The script runs as root under SSM. pm2's daemon and node belong to the
+      # app user (/home/ubuntu/.pm2), so everything is re-entered as that user;
+      # running pm2 as root would talk to a different, empty daemon.
+      - name: Build the remote deploy script
+        run: |
+          cat > remote-deploy.sh <<OUTER
+          set -euo pipefail
+
+          echo "== rms deploy ${GITHUB_SHA::7} =="
+
+          cat > /tmp/rms-deploy-inner.sh <<'INNER'
+          set -euo pipefail
+
+          # A non-interactive shell skips .bashrc, so an nvm-installed node/pm2
+          # would not be on PATH. Load it when present, then widen PATH a little
+          # for apt/npm-global installs.
+          export NVM_DIR="\$HOME/.nvm"
+          [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+          export PATH="\$PATH:/usr/local/bin:/usr/bin:/snap/bin"
+
+          command -v node > /dev/null || { echo "node is not on PATH"; exit 1; }
+          command -v pm2  > /dev/null || { echo "pm2 is not on PATH";  exit 1; }
+          echo "node \$(node --version), pm2 \$(pm2 --version)"
+
+          cd "$APP_DIR"
+
+          # Refuse to deploy over hand-edits on the box; a silent overwrite here
+          # is how work gets lost.
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "ERROR: $APP_DIR has uncommitted local modifications:"
+            git status --short
+            exit 1
+          fi
+
+          # Deterministic: land exactly on the commit that was tested, rather
+          # than whatever a merge would produce. Untracked files (.env, uploads/)
+          # are preserved by reset --hard.
+          git fetch origin --prune
+          git checkout "$DEPLOY_BRANCH"
+          git reset --hard "$GITHUB_SHA"
+          echo "Now at \$(git rev-parse --short HEAD)"
+
+          npm ci --omit=dev --no-audit --no-fund
+          mkdir -p uploads
+
+          # db.init() creates any new tables from schema.sql on boot, so the
+          # restart below is also what applies schema changes.
+          if pm2 describe "$PM2_APP_NAME" > /dev/null 2>&1; then
+            pm2 reload "$PM2_APP_NAME" --update-env
+          else
+            pm2 start server.js --name "$PM2_APP_NAME"
+          fi
+          pm2 save
+
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if curl -fsS --max-time 5 "http://127.0.0.1:$APP_PORT/api/health"; then
+              echo ""
+              echo "HEALTHY"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "ERROR: /api/health did not respond within 60s"
+          pm2 logs "$PM2_APP_NAME" --lines 50 --nostream || true
+          exit 1
+          INNER
+
+          chmod 0755 /tmp/rms-deploy-inner.sh
+          chown "$DEPLOY_USER" /tmp/rms-deploy-inner.sh
+          trap 'rm -f /tmp/rms-deploy-inner.sh' EXIT
+          sudo -iu "$DEPLOY_USER" bash /tmp/rms-deploy-inner.sh
+          OUTER
+
+          # -Rs turns the whole file into one JSON string, so no quoting of the
+          # script leaks into the SSM parameters.
+          jq -Rs '{commands: [.], executionTimeout: ["900"]}' remote-deploy.sh > ssm-params.json
+          echo "Remote script: $(wc -l < remote-deploy.sh) lines"
+
+      - name: Run the deploy on the instance
+        id: ssm
+        run: |
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "rms deploy ${GITHUB_SHA::7} (run ${GITHUB_RUN_ID})" \
+            --parameters file://ssm-params.json \
+            --timeout-seconds 600 \
+            --query 'Command.CommandId' --output text)
+          echo "command-id=$command_id" >> "$GITHUB_OUTPUT"
+          echo "SSM command $command_id dispatched; waiting..."
+
+          status=Pending
+          for attempt in $(seq 1 120); do
+            status=$(aws ssm get-command-invocation \
+              --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+              --query 'Status' --output text 2>/dev/null || echo Pending)
+            case "$status" in
+              Success|Failed|Cancelled|TimedOut|Undeliverable|Terminated) break ;;
+            esac
+            sleep 5
+          done
+
+          echo "--- remote stdout ---"
+          aws ssm get-command-invocation \
+            --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+            --query 'StandardOutputContent' --output text || true
+          echo "--- remote stderr ---"
+          aws ssm get-command-invocation \
+            --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+            --query 'StandardErrorContent' --output text || true
+
+          echo "Final status: $status"
+          [ "$status" = "Success" ] || { echo "::error::Deploy failed on the instance ($status)."; exit 1; }
+
+      # Independent of the in-instance check: proves the public hostname serves
+      # the new code through nginx, not just localhost:3000.
+      - name: Verify the public endpoint
+        run: |
+          url="${{ vars.APP_URL || 'https://rms.k-innovative.com' }}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$url/api/health")
+          echo "GET $url/api/health -> $code"
+          [ "$code" = "200" ] || { echo "::error::Public health check returned $code."; exit 1; }
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy ${{ job.status }}"
+            echo ""
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- Instance: \`${INSTANCE_ID}\` -> \`${APP_DIR}\`"
+            echo "- Process: \`${PM2_APP_NAME}\` on port \`${APP_PORT}\`"
+            echo "- SSM command: \`${{ steps.ssm.outputs.command-id }}\`"
+            echo ""
+            echo "Rollback: re-run this workflow from the previous good commit, or on the box:"
+            echo '```'
+            echo "sudo -iu ${DEPLOY_USER} bash -lc 'cd ${APP_DIR} && git reset --hard <good-sha> && npm ci --omit=dev && pm2 reload ${PM2_APP_NAME}'"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
