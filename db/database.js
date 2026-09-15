@@ -236,6 +236,25 @@ async function runMigrations() {
     }
   }
 
+  if (await tableExists('transport_requests')) {
+    for (const column of ['vehicle_number', 'driver_name', 'driver_mobile']) {
+      if (String(await columnType('transport_requests', column)).toLowerCase() !== 'text') {
+        await pool.query(`ALTER TABLE transport_requests MODIFY ${column} TEXT NULL`);
+      }
+    }
+  }
+
+  // Preserve allocations made before multi-vehicle support was introduced.
+  if (await tableExists('transport_request_buses')) {
+    await pool.query(`
+      INSERT IGNORE INTO transport_request_buses
+        (request_id, bus_id, vehicle_number, seating_capacity, driver_name, driver_mobile)
+      SELECT r.id, b.id, b.bus_number, b.seating_capacity, r.driver_name, r.driver_mobile
+      FROM transport_requests r JOIN buses b ON b.id = r.bus_id
+      WHERE r.status = 'Accepted' AND r.bus_id IS NOT NULL
+    `);
+  }
+
   await seedRolesAndPermissions();
 }
 

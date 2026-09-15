@@ -159,14 +159,26 @@ router.get('/', wrap(async (req, res) => {
   res.json({ rows, total, page, pageSize: PAGE_SIZE, totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE)) });
 }));
 // Reserve whole dates for existing school trips, whose records have no end time.
-const freeSql = `b.status='Active' AND b.seating_capacity >= ?
- AND NOT EXISTS (SELECT 1 FROM transport_requests r WHERE r.bus_id=b.id AND r.status='Accepted' AND r.travel_at < ? AND r.end_at > ?)
+// Check both the allocation table and legacy single-bus rows during rollout.
+const freeSql = `b.status='Active'
+ AND NOT EXISTS (
+   SELECT 1 FROM transport_request_buses rb
+   JOIN transport_requests booked ON booked.id=rb.request_id
+   WHERE rb.bus_id=b.id AND booked.status='Accepted' AND booked.travel_at < ? AND booked.end_at > ?
+ )
+ AND NOT EXISTS (
+   SELECT 1 FROM transport_requests legacy
+   WHERE legacy.bus_id=b.id AND legacy.status='Accepted'
+     AND legacy.travel_at < ? AND legacy.end_at > ?
+     AND NOT EXISTS (SELECT 1 FROM transport_request_buses rb2 WHERE rb2.request_id=legacy.id)
+ )
  AND NOT EXISTS (SELECT 1 FROM trip_assignments t WHERE t.bus_id=b.id AND t.trip_date BETWEEN DATE(DATE_ADD(?, INTERVAL 330 MINUTE)) AND DATE(DATE_ADD(?, INTERVAL 330 MINUTE)))`;
-const availabilityArgs = r => [r.persons, r.end_at, r.travel_at, r.travel_at, r.end_at];
+const availabilityArgs = r => [r.end_at, r.travel_at, r.end_at, r.travel_at, r.travel_at, r.end_at];
 router.get('/:id/vehicles', wrap(async (req, res) => {
   const r = await db.get('SELECT * FROM transport_requests WHERE id=?', [req.params.id]);
   if (!r) throw fail('Request not found.', 404);
-  res.json(await db.query(`SELECT b.* FROM buses b WHERE ${freeSql} ORDER BY b.bus_number`, availabilityArgs(r)));
+  const vehicles = await db.query(`SELECT b.* FROM buses b WHERE ${freeSql} ORDER BY b.bus_number`, availabilityArgs(r));
+  res.json(vehicles.map(b => ({ ...b, seating_capacity: Number(b.seating_capacity) })));
 }));
 async function notify(id) {
   const claim = await db.run(`UPDATE transport_request_messages SET status='Sending', attempts=attempts+1, updated_at=NOW()
@@ -186,20 +198,40 @@ router.post('/:id/decision', wrap(async (req, res) => {
     const r = await t.get('SELECT * FROM transport_requests WHERE id=? FOR UPDATE', [req.params.id]);
     if (!r) throw fail('Request not found.', 404);
     if (r.status !== 'Pending') throw fail('This request has already been decided.', 409);
-    let b = {}; let staff = {};
+    let buses = []; let staff = {};
     if (status === 'Accepted') {
       if (new Date(r.travel_at.replace(' ', 'T') + 'Z').getTime() <= Date.now()) throw fail('Travel time has passed; reject this request and ask for a new one.');
-      // Lock the vehicle before checking bookings, serializing competing allocations.
-      b = await t.get('SELECT * FROM buses WHERE id=? FOR UPDATE', [Number(req.body.bus_id) || 0]);
-      if (!b) throw fail('Choose a vehicle.');
-      const available = await t.get(`SELECT b.id FROM buses b WHERE b.id=? AND ${freeSql}`, [b.id, ...availabilityArgs(r)]);
-      if (!available) throw fail('Vehicle is unavailable or has insufficient capacity. Refresh the available vehicles.', 409);
-      for (const key of ['driver_name', 'driver_mobile', 'attender_name', 'attender_mobile']) staff[key] = str(req.body, key, key.endsWith('mobile') ? 30 : 150, !key.startsWith('attender'));
-      for (const key of ['driver_mobile', 'attender_mobile']) if (staff[key] && !whatsapp.isValidDestination(whatsapp.formatNumber(staff[key]))) throw fail('Enter valid driver/attender phone numbers.');
+      const rawIds = Array.isArray(req.body.bus_ids) ? req.body.bus_ids : [req.body.bus_id];
+      const busIds = [...new Set(rawIds.map(Number).filter(Number.isInteger))].sort((a, b) => a - b);
+      if (!busIds.length) throw fail('Choose at least one vehicle.');
+      // Lock in stable ID order before rechecking availability, serializing competing allocations.
+      for (const id of busIds) {
+        const b = await t.get('SELECT * FROM buses WHERE id=? FOR UPDATE', [id]);
+        if (!b) throw fail('One of the selected vehicles no longer exists. Refresh the available vehicles.', 409);
+        const available = await t.get(`SELECT b.id FROM buses b WHERE b.id=? AND ${freeSql}`, [id, ...availabilityArgs(r)]);
+        if (!available) throw fail(`Vehicle ${b.bus_number} is no longer available. Refresh the available vehicles.`, 409);
+        buses.push(b);
+      }
+      const totalCapacity = buses.reduce((sum, b) => sum + Number(b.seating_capacity), 0);
+      if (totalCapacity < Number(r.persons)) throw fail(`Selected vehicle capacity is ${totalCapacity}; at least ${r.persons} seats are required.`, 409);
+      for (const b of buses) {
+        if (!b.driver_name || !b.driver_mobile) throw fail(`Add driver name and mobile to bus ${b.bus_number} before allocating it.`);
+        if (!whatsapp.isValidDestination(whatsapp.formatNumber(b.driver_mobile))) throw fail(`Bus ${b.bus_number} has an invalid driver mobile number.`);
+      }
+      for (const key of ['attender_name', 'attender_mobile']) staff[key] = str(req.body, key, key.endsWith('mobile') ? 30 : 150, false);
+      if (staff.attender_mobile && !whatsapp.isValidDestination(whatsapp.formatNumber(staff.attender_mobile))) throw fail('Enter a valid attender phone number.');
       if (!!staff.attender_name !== !!staff.attender_mobile) throw fail('Provide both attender name and mobile, or leave both empty.');
     }
+    const vehicleNumbers = buses.map(b => b.bus_number).join(', ');
+    const driverNames = buses.map(b => `${b.bus_number}: ${b.driver_name}`).join('; ');
+    const driverMobiles = buses.map(b => `${b.bus_number}: ${b.driver_mobile}`).join('; ');
     await t.run(`UPDATE transport_requests SET status=?, bus_id=?, vehicle_number=?, driver_name=?, driver_mobile=?, attender_name=?, attender_mobile=?, rejection_reason=?, decided_by=?, decided_at=NOW() WHERE id=?`,
-      [status, b.id || null, b.bus_number || null, staff.driver_name || null, staff.driver_mobile || null, staff.attender_name || null, staff.attender_mobile || null, rejection, req.user.id, r.id]);
+      [status, buses[0]?.id || null, vehicleNumbers || null, driverNames || null, driverMobiles || null, staff.attender_name || null, staff.attender_mobile || null, rejection, req.user.id, r.id]);
+    for (const b of buses) {
+      await t.run(`INSERT INTO transport_request_buses
+        (request_id, bus_id, vehicle_number, seating_capacity, driver_name, driver_mobile)
+        VALUES (?, ?, ?, ?, ?, ?)`, [r.id, b.id, b.bus_number, b.seating_capacity, b.driver_name, b.driver_mobile]);
+    }
     await t.run('INSERT INTO transport_request_messages (request_id) VALUES (?)', [r.id]);
   });
   // Commit the decision before contacting the provider; failed sends remain retryable.

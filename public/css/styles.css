@@ -629,6 +629,19 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--charcoal
 .transport-review .note { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: var(--text-muted); }
 .transport-review .field { margin-bottom: 13px; }
 .transport-review .transport-message { margin: 0 0 12px; padding: 12px; font-size: 12px; max-height: 200px; overflow: auto; }
+.vehicle-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-height: 260px; overflow: auto; padding: 3px; }
+.vehicle-search { margin-bottom: 8px; }
+.vehicle-search input { padding-right: 112px; }
+.vehicle-search > span { position: absolute; right: 12px; color: var(--text-muted); font-size: 11px; white-space: nowrap; pointer-events: none; }
+.vehicle-no-results { padding: 12px; text-align: center; }
+.vehicle-choice { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--surface); }
+.vehicle-choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.vehicle-choice input { width: auto; margin-top: 3px; }
+.vehicle-choice span { display: grid; gap: 2px; min-width: 0; }
+.vehicle-choice small { color: var(--text-muted); line-height: 1.35; }
+.capacity-summary { margin-top: 9px; padding: 9px 11px; border-radius: 8px; background: var(--surface-2); color: var(--text-muted); font-weight: 700; }
+.capacity-summary.capacity-ok { background: var(--success-soft); color: var(--success); }
+.field-error { margin: 8px 0 0; color: var(--danger); font-size: 12px; }
 .transport-message { padding: 16px; background: #f4f4f4; font: inherit; }
 /* Public board of upcoming adhoc journeys */
 .transport-public .head-text h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
@@ -680,6 +693,7 @@ tbody tr.is-new > td { background: var(--accent-soft); box-shadow: inset 3px 0 0
 .dot.green { background: var(--success); }
 .dot.amber { background: var(--warning); }
 @media (max-width: 640px) {
+  .vehicle-choices { grid-template-columns: 1fr; }
   .cal-day { min-height: 58px; padding: 6px; }
   .cal-count, .cal-legend { font-size: 10.5px; }
 }

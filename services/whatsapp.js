@@ -114,8 +114,20 @@ function collectProviderValues(value, depth = 0) {
   );
 }
 
+// WhatsApp rejects template parameters containing newlines, tabs, or more than
+// 4 consecutive spaces, and caps body parameters at 1024 characters. The BSP still
+// returns HTTP 200 for such requests, so the message silently never arrives.
+function cleanParam(value) {
+  return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 1024);
+}
+
 function templateParams(vars) {
-  return TEMPLATE_PARAM_KEYS.map((key) => vars[key] || '');
+  return TEMPLATE_PARAM_KEYS.map((key) => cleanParam(vars[key]));
+}
+
+function logProviderRejection(campaignName, statusCode, text) {
+  // Server log only: the body may echo the destination number, so it stays out of the UI.
+  console.warn(`[whatsapp] Provider rejected campaign "${campaignName}": ${responseSummary(statusCode, text).slice(0, 600)}`);
 }
 
 async function postJson(url, payload) {
@@ -217,6 +229,7 @@ async function sendOne({ mobile, studentName, busNumber, trackingLink, contactNo
   try {
     const resp = await postJson(config.endpoint, payload);
     const provider = parseProviderResponse(resp.statusCode, resp.text);
+    if (!provider.ok) logProviderRejection(config.studentCampaign, resp.statusCode, resp.text);
 
     return {
       status: provider.ok ? 'Sent' : 'Failed',
@@ -239,13 +252,14 @@ module.exports = {
   formatNumber,
   isValidDestination,
   parseProviderResponse,
+  cleanParam,
   DEFAULT_TEMPLATE,
   TEMPLATE_PARAM_KEYS,
 };
 
 // Separate approved campaigns are required for adhoc decisions; never reuse the student campaign.
 const TRANSPORT_CONFIRMATION_TEMPLATE = 'Dear {{requestor}}, your transport request {{reference}} ({{subject}}) is confirmed.\nTravel: {{travel_time}}\nTrip: {{trip_type}}\nFrom: {{origin}}\nDestination: {{destination}}\nPersons: {{persons}}\nVehicle: {{vehicle}}\nDriver: {{driver}}\nAttender: {{attender}}\nPickup map: {{pickup_map}}\nDestination map: {{destination_map}}';
-const TRANSPORT_REJECTION_TEMPLATE = 'Dear {{requestor}}, your transport request {{reference}} ({{subject}}) for {{travel_time}} has been rejected.\nReason: {{reason}}';
+const TRANSPORT_REJECTION_TEMPLATE = 'Dear {{requestor}},\n\nYour transport request {{reference}} for {{subject}}, scheduled for {{travel_time}}, has been rejected.\n\nReason: {{reason}}\n\nFeel free to reachout to the transport incharge directly for any queries.';
 const TRANSPORT_CONFIRMATION_KEYS = ['requestor', 'reference', 'subject', 'travel_time', 'trip_type', 'origin', 'destination', 'persons', 'vehicle', 'driver', 'attender', 'pickup_map', 'destination_map'];
 const TRANSPORT_REJECTION_KEYS = ['requestor', 'reference', 'subject', 'travel_time', 'reason'];
 async function sendTransportRequest(r) {
@@ -272,11 +286,13 @@ async function sendTransportRequest(r) {
     const result = await postJson(config.endpoint, {
       apiKey: config.apiKey, campaignName, destination,
       userName: config.userName,
-      templateParams: (accepted ? TRANSPORT_CONFIRMATION_KEYS : TRANSPORT_REJECTION_KEYS).map(key => vars[key] || ''),
+      templateParams: (accepted ? TRANSPORT_CONFIRMATION_KEYS : TRANSPORT_REJECTION_KEYS).map(key => cleanParam(vars[key])),
       source: 'adhoc-transport', media: {}, buttons: [], carouselCards: [], location: {}, attributes: {}, paramsFallbackValue: {},
     });
+    const provider = parseProviderResponse(result.statusCode, result.text);
+    if (!provider.ok) logProviderRejection(campaignName, result.statusCode, result.text);
     // Keep provider responses out of the UI: they may echo credentials or personal data.
-    return { status: parseProviderResponse(result.statusCode, result.text).ok ? 'Sent' : 'Failed', message, response: `SmartPing HTTP ${result.statusCode}. Sent means accepted by provider, not confirmed delivery.` };
+    return { status: provider.ok ? 'Sent' : 'Failed', message, response: `SmartPing HTTP ${result.statusCode}. Sent means accepted by provider, not confirmed delivery.` };
   } catch (e) {
     return { status: 'Failed', message, response: e.name === 'AbortError' ? 'Provider timed out. Check provider history before retrying.' : 'Could not contact SmartPing. Check provider history before retrying.' };
   }

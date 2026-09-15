@@ -30,7 +30,7 @@ before(async () => {
   await db.init();
   await db.run("INSERT INTO roles (role_key,role_name) VALUES ('admin','Admin')");
   await db.run("INSERT INTO role_permissions (role_key,page_key) VALUES ('admin','settings')");
-  bus = (await db.run("INSERT INTO buses (bus_number, route_number, seating_capacity) VALUES ('TEST-01','TEST',10)")).lastInsertRowid;
+  bus = (await db.run("INSERT INTO buses (bus_number, route_number, seating_capacity, driver_name, driver_mobile) VALUES ('TEST-01','TEST',10,'Test driver','+919876543211')")).lastInsertRowid;
   admin = signToken({ id: 1, username: 'test', role: 'transport_incharge' });
   administrator = signToken({ id: 3, username: 'administrator', role: 'admin', access: ['settings'] });
   entry = signToken({ id: 2, username: 'test-entry', role: 'data_entry', access: ['transport-requests'] });
@@ -86,14 +86,28 @@ test('rejection requires a reason and renders a separate notification', async ()
   assert.equal((await request(`/${r.id}/retry`, 'POST', {}, administrator)).status, 200);
   assert.match(message.message, /No vehicles available/); assert.match(message.message, /rejected/);
 });
-test('availability excludes insufficient capacity and school trip bookings', async () => {
+test('availability returns free buses for combined allocation and excludes school trip bookings', async () => {
   const large = await create({ persons: 11, travel_at: '2090-02-01T04:30:00Z', end_at: '2090-02-01T08:30:00Z' });
-  assert.equal((await request(`/${large.id}/vehicles`, 'GET', undefined, admin)).body.length, 0);
+  assert.equal((await request(`/${large.id}/vehicles`, 'GET', undefined, admin)).body.length, 1);
   assert.equal((await request(`/${large.id}/decision`, 'POST', decision(), admin)).status, 409);
   const student = (await db.run("INSERT INTO students (student_code,name) VALUES ('TEST-STUDENT','Test')")).lastInsertRowid;
   await db.run("INSERT INTO trip_assignments (student_id,trip_date,bus_id) VALUES (?,'2090-03-01',?)", [student, bus]);
   const trip = await create({ travel_at: '2090-03-01T04:30:00Z', end_at: '2090-03-01T08:30:00Z' });
   assert.equal((await request(`/${trip.id}/vehicles`, 'GET', undefined, admin)).body.length, 0);
+});
+test('multiple buses can satisfy one large request and all become unavailable for overlaps', async () => {
+  const first = (await db.run("INSERT INTO buses (bus_number, route_number, seating_capacity, driver_name, driver_mobile) VALUES ('LARGE-01','L1',400,'Driver one','+919876543213')")).lastInsertRowid;
+  const second = (await db.run("INSERT INTO buses (bus_number, route_number, seating_capacity, driver_name, driver_mobile) VALUES ('LARGE-02','L2',350,'Driver two','+919876543214')")).lastInsertRowid;
+  const large = await create({ persons: 680, travel_at: '2090-04-01T04:30:00Z', end_at: '2090-04-01T08:30:00Z' });
+  const result = await request(`/${large.id}/decision`, 'POST', { status: 'Accepted', bus_ids: [first, second] }, admin);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  const saved = await db.get('SELECT vehicle_number, driver_name FROM transport_requests WHERE id=?', [large.id]);
+  assert.equal(saved.vehicle_number, 'LARGE-01, LARGE-02');
+  assert.match(saved.driver_name, /LARGE-01: Driver one/);
+  assert.equal(Number((await db.get('SELECT COUNT(*) AS n FROM transport_request_buses WHERE request_id=?', [large.id])).n), 2);
+  const overlap = await create({ persons: 4, travel_at: '2090-04-01T05:30:00Z', end_at: '2090-04-01T07:30:00Z' });
+  const available = (await request(`/${overlap.id}/vehicles`, 'GET', undefined, admin)).body.map(b => b.bus_number);
+  assert.ok(!available.includes('LARGE-01') && !available.includes('LARGE-02'));
 });
 test('missing live campaign configuration fails instead of pretending to send', async () => {
   process.env.WHATSAPP_ENABLED = 'true';

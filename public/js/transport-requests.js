@@ -364,6 +364,11 @@
       if (r.status === 'Pending') {
         try { vehicles = await API.get(`/transport-requests/${r.id}/vehicles`); } catch (e) { toast(e.message, 'error'); return; }
       }
+      const fleetCapacity = vehicles.reduce((sum, b) => sum + Number(b.seating_capacity || 0), 0);
+      const vehicleChoices = vehicles.length ? vehicles.map(b => `<label class="vehicle-choice" data-search="${esc([b.bus_number, b.route_number, b.seating_capacity, b.driver_name].filter(Boolean).join(' ').toLowerCase())}">
+        <input type="checkbox" name="bus_ids" value="${esc(b.id)}">
+        <span><b>${esc(b.bus_number)}</b><small>${esc(b.seating_capacity)} seats${b.route_number ? ` · Route ${esc(b.route_number)}` : ''}${b.driver_name ? ` · ${esc(b.driver_name)}` : ' · Driver not configured'}</small></span>
+      </label>`).join('') : '<p class="muted">No active vehicles are free for these dates.</p>';
       UI.modal({ title: r.reference, size: 'lg', body: `<div class="transport-review"><h2>${esc(r.subject)}</h2>
         <div class="detail-grid">
           ${detail('Requestor', esc(r.requestor_name))}
@@ -376,9 +381,12 @@
           ${detail('To', locationLink(r.destination_name, r.to_lat, r.to_lng))}
           ${detail('Reason for travel', `<span class="transport-reason">${esc(r.reason)}</span>`, true)}
         </div>
-        ${r.status === 'Pending' ? `<form id="decision-form"><div class="field"><label for="decision-status">Decision</label><select id="decision-status" name="status"><option value="Accepted">Accept and allocate vehicle</option><option value="Rejected">Reject with reason</option></select></div>
-          <div id="allocation-fields"><p class="note">Available vehicles have enough seats and no overlapping adhoc booking. Vehicles with school trips on these dates are excluded. Verify other operational commitments before confirming.</p><div class="field"><label for="decision-vehicle">Available vehicle</label>${Forms.searchSelectInput({ name: 'bus_id', inputId: 'decision-vehicle', required: true, placeholder: vehicles.length ? 'Search vehicle number, seats or route' : 'No vehicles available', items: vehicles.map(b => ({ value: b.id, label: `${b.bus_number} · ${b.seating_capacity} seats · Route ${b.route_number}` })) })}</div><div class="form-grid">
-          ${field('Driver name', 'driver_name', 'text', 'maxlength="150"')}${field('Driver mobile', 'driver_mobile', 'tel', 'maxlength="30"')}${field('Attender name (optional)', 'attender_name', 'text', 'maxlength="150"', false)}${field('Attender mobile (optional)', 'attender_mobile', 'tel', 'maxlength="30"', false)}</div></div>
+        ${r.status === 'Pending' ? `<form id="decision-form"><div class="field"><label for="decision-status">Decision</label><select id="decision-status" name="status"><option value="Accepted">Accept and allocate vehicles</option><option value="Rejected">Reject with reason</option></select></div>
+          <div id="allocation-fields"><p class="note">Select enough available vehicles to cover all ${esc(r.persons)} travellers. Vehicles with overlapping bookings or school trips are excluded.</p>
+          <div class="field"><label for="vehicle-search">Available vehicles</label>
+          ${vehicles.length ? `<div class="input-icon vehicle-search">${Icons.svg('search', 16)}<input id="vehicle-search" type="search" autocomplete="off" placeholder="Search bus number, route, seats or driver"><span id="vehicle-result-count">${vehicles.length} vehicles</span></div>` : ''}
+          <div class="vehicle-choices">${vehicleChoices}</div><p class="muted vehicle-no-results" id="vehicle-no-results" hidden>No vehicles match your search.</p><div class="capacity-summary" id="capacity-summary" aria-live="polite">Selected capacity: 0 / ${esc(r.persons)} seats</div>${fleetCapacity < Number(r.persons) ? `<p class="field-error">The currently available fleet has only ${esc(fleetCapacity)} seats. More vehicles must be made available.</p>` : ''}</div><div class="form-grid">
+          ${field('Attender name (optional)', 'attender_name', 'text', 'maxlength="150"', false)}${field('Attender mobile (optional)', 'attender_mobile', 'tel', 'maxlength="30"', false)}</div></div>
           <div id="rejection-fields" hidden><div class="field"><label for="decision-reason">Rejection reason</label><textarea id="decision-reason" name="rejection_reason" maxlength="2000" rows="3" disabled></textarea></div></div><p class="note">The decision triggers a WhatsApp update using the configured campaign.</p><div id="decision-error" role="alert"></div><button class="btn" id="save-decision">Confirm decision</button></form>`
         : `<div class="detail-grid">
           ${detail('Decision', statusChip(r.status))}
@@ -395,18 +403,26 @@
             return;
           }
           const form = el.querySelector('#decision-form');
-          Forms.bindSearchSelects(el, { emptyText: 'No matching vehicles' });
-          const vehicleInput = el.querySelector('#decision-vehicle');
-          // The modal body scrolls, so keep the suggestion list in view when the field is focused.
-          vehicleInput.addEventListener('focus', () => setTimeout(() => el.querySelector('.search-select-field .suggest-list').scrollIntoView({ block: 'nearest' }), 0));
-          // Typing re-resolves the value on every keystroke; only a genuine vehicle change should
-          // overwrite driver details the reviewer may have edited by hand.
-          let chosen = '';
-          form.elements.bus_id.addEventListener('change', () => {
-            if (form.elements.bus_id.value === chosen) return;
-            chosen = form.elements.bus_id.value;
-            const b = vehicles.find(v => String(v.id) === chosen) || {};
-            form.elements.driver_name.value = b.driver_name || ''; form.elements.driver_mobile.value = b.driver_mobile || '';
+          const capacitySummary = el.querySelector('#capacity-summary');
+          const selectedBuses = () => [...form.querySelectorAll('input[name="bus_ids"]:checked')];
+          const updateCapacity = () => {
+            const capacity = selectedBuses().reduce((sum, input) => sum + Number(vehicles.find(b => String(b.id) === input.value)?.seating_capacity || 0), 0);
+            capacitySummary.textContent = `Selected capacity: ${capacity} / ${r.persons} seats`;
+            capacitySummary.classList.toggle('capacity-ok', capacity >= Number(r.persons));
+            return capacity;
+          };
+          form.querySelectorAll('input[name="bus_ids"]').forEach(input => input.addEventListener('change', updateCapacity));
+          const vehicleSearch = el.querySelector('#vehicle-search');
+          if (vehicleSearch) vehicleSearch.addEventListener('input', () => {
+            const query = vehicleSearch.value.trim().toLowerCase();
+            let shown = 0;
+            el.querySelectorAll('.vehicle-choice').forEach(choice => {
+              const matches = !query || choice.dataset.search.includes(query);
+              choice.hidden = !matches;
+              if (matches) shown++;
+            });
+            el.querySelector('#vehicle-result-count').textContent = `${shown} of ${vehicles.length} vehicles`;
+            el.querySelector('#vehicle-no-results').hidden = shown !== 0;
           });
           el.querySelector('#decision-status').onchange = e => {
             const reject = e.target.value === 'Rejected';
@@ -418,15 +434,16 @@
             e.preventDefault();
             const error = el.querySelector('#decision-error');
             // A hidden input is exempt from constraint validation, so check the vehicle here.
-            if (form.elements.status.value === 'Accepted' && !form.elements.bus_id.value) {
-              error.textContent = vehicles.length ? 'Select a vehicle from the list.' : 'No vehicles are available for these dates.';
-              vehicleInput.focus();
-              return;
+            if (form.elements.status.value === 'Accepted') {
+              if (!selectedBuses().length) { error.textContent = 'Select at least one vehicle.'; return; }
+              if (updateCapacity() < Number(r.persons)) { error.textContent = `Select enough vehicles for all ${r.persons} travellers.`; return; }
             }
             if (!form.reportValidity()) return;
             error.textContent = '';
             const button = el.querySelector('#save-decision'); button.disabled = true;
-            try { const result = await API.post(`/transport-requests/${r.id}/decision`, Object.fromEntries(new FormData(form))); toast(`Decision saved. WhatsApp: ${result.notification.status}`, 'success'); close(); load(); }
+            const data = Object.fromEntries(new FormData(form));
+            data.bus_ids = selectedBuses().map(input => Number(input.value));
+            try { const result = await API.post(`/transport-requests/${r.id}/decision`, data); toast(`Decision saved. WhatsApp: ${result.notification.status}`, 'success'); close(); load(); }
             catch (error) { el.querySelector('#decision-error').textContent = error.message; button.disabled = false; }
           };
         },

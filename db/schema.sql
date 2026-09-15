@@ -163,9 +163,9 @@ CREATE TABLE IF NOT EXISTS transport_requests (
  trip_type ENUM('Drop','Round trip') NOT NULL,
  status ENUM('Pending','Accepted','Rejected') NOT NULL DEFAULT 'Pending',
  bus_id INT,
- vehicle_number VARCHAR(50),
- driver_name VARCHAR(150),
- driver_mobile VARCHAR(30),
+ vehicle_number TEXT,
+ driver_name TEXT,
+ driver_mobile TEXT,
  attender_name VARCHAR(150),
  attender_mobile VARCHAR(30),
  rejection_reason TEXT,
@@ -175,6 +175,23 @@ CREATE TABLE IF NOT EXISTS transport_requests (
  INDEX idx_request_status (status, created_at),
  INDEX idx_request_booking (bus_id, status, travel_at, end_at),
  CONSTRAINT fk_request_bus FOREIGN KEY (bus_id) REFERENCES buses(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- One request may need several vehicles. The legacy bus_id/vehicle_number fields
+-- above remain as a denormalized summary for existing reports and notifications.
+CREATE TABLE IF NOT EXISTS transport_request_buses (
+ id INT AUTO_INCREMENT PRIMARY KEY,
+ request_id INT NOT NULL,
+ bus_id INT NOT NULL,
+ vehicle_number VARCHAR(50) NOT NULL,
+ seating_capacity INT NOT NULL,
+ driver_name VARCHAR(150),
+ driver_mobile VARCHAR(30),
+ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE KEY uniq_request_bus (request_id, bus_id),
+ INDEX idx_request_bus_booking (bus_id, request_id),
+ CONSTRAINT fk_request_bus_allocation_request FOREIGN KEY (request_id) REFERENCES transport_requests(id) ON DELETE CASCADE,
+ CONSTRAINT fk_request_bus_allocation_bus FOREIGN KEY (bus_id) REFERENCES buses(id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS transport_request_messages (
