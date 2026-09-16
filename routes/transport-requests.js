@@ -3,6 +3,8 @@ const express = require('express');
 const db = require('../db/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const whatsapp = require('../services/whatsapp');
+const multer = require('multer');
+const { parseUpload, buildWorkbook } = require('../services/excel');
 const router = express.Router();
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const wrap = fn => async (req, res, next) => { try { await fn(req, res); } catch (e) { if (e.status) res.status(e.status).json({ error: e.message }); else next(e); } };
@@ -37,6 +39,40 @@ function validate(body) {
   if (!/^[a-f0-9-]{36}$/i.test(data.submission_key)) throw fail('Invalid submission key. Refresh the form.');
   return data;
 }
+// Requests for more than this many persons must carry a list of who is travelling.
+const TRAVELLER_LIST_THRESHOLD = 2;
+const TRAVELLER_LIST_MAX_BYTES = 5 * 1024 * 1024;
+const TRAVELLER_LIST_TYPES = { xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', csv: 'text/csv' };
+const TRAVELLER_TEMPLATE_COLUMNS = [
+  { header: 'S.No', key: 'sno', width: 8 }, { header: 'Name', key: 'name', width: 30 },
+  { header: 'Class / Department', key: 'group', width: 22 }, { header: 'ID / Admission number', key: 'id_number', width: 22 },
+  { header: 'Mobile', key: 'mobile', width: 18 },
+];
+// Multer only engages for multipart bodies, so the JSON API keeps working unchanged.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: TRAVELLER_LIST_MAX_BYTES, files: 1 } });
+const travellerUpload = (req, res, next) => upload.single('travellers')(req, res, err => {
+  if (!err) return next();
+  if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'The traveller list must be 5 MB or smaller.' });
+  res.status(400).json({ error: 'Could not read the uploaded traveller list.' });
+});
+// The file is parsed on the way in so the incharge never receives something Excel cannot open.
+async function travellerList(file, persons) {
+  if (!file) {
+    if (persons > TRAVELLER_LIST_THRESHOLD) throw fail(`Attach the list of travellers (.xlsx or .csv) when more than ${TRAVELLER_LIST_THRESHOLD} persons are travelling.`);
+    return null;
+  }
+  const ext = (file.originalname.match(/\.(xlsx|csv)$/i) || [])[1];
+  if (!ext) throw fail('The traveller list must be an Excel (.xlsx) or CSV file.');
+  if (!file.size) throw fail('The traveller list is empty.');
+  let parsed;
+  try { parsed = await parseUpload(file.buffer, file.originalname); }
+  catch (_) { throw fail('The traveller list could not be read. Save it as .xlsx or .csv and try again.'); }
+  if (!parsed.rows.length) throw fail('The traveller list has no rows below the header.');
+  return {
+    file_name: file.originalname.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 255),
+    mime_type: TRAVELLER_LIST_TYPES[ext.toLowerCase()], size_bytes: file.size, row_count: parsed.rows.length, content: file.buffer,
+  };
+}
 // References are a plain running sequence zero-padded to four digits (0001, 0002, ...), widening
 // past 9999. Legacy TR-<hex> references are ignored by the numeric filter and left as they are.
 async function nextReference() {
@@ -45,7 +81,7 @@ async function nextReference() {
 }
 // Bounded, per-process abuse protection; upstream rate limits can be added for multiple instances.
 const limits = new Map();
-router.post('/', wrap(async (req, res) => {
+router.post('/', travellerUpload, wrap(async (req, res) => {
   const now = Date.now();
   for (const [key, entry] of limits) if (entry.until < now) limits.delete(key);
   const key = req.ip;
@@ -53,12 +89,18 @@ router.post('/', wrap(async (req, res) => {
   if (entry.count >= 20 || limits.size > 10000) throw fail('Too many submissions. Please try again later.', 429);
   entry.count++; limits.set(key, entry);
   const data = validate(req.body);
+  const attachment = await travellerList(req.file, data.persons);
   // Concurrent submissions can pick the same number; the UNIQUE key rejects the loser and we retry.
   for (let attempt = 0; ; attempt++) {
     data.reference = await nextReference();
     try {
-      const keys = Object.keys(data);
-      await db.run(`INSERT INTO transport_requests (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`, Object.values(data));
+      await db.transaction(async t => {
+        const keys = Object.keys(data);
+        const saved = await t.run(`INSERT INTO transport_requests (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`, Object.values(data));
+        if (!attachment) return;
+        const columns = Object.keys(attachment);
+        await t.run(`INSERT INTO transport_request_attachments (request_id, ${columns.join(',')}) VALUES (?, ${columns.map(() => '?').join(',')})`, [saved.lastInsertRowid, ...Object.values(attachment)]);
+      });
       break;
     } catch (e) {
       if (e.code !== 'ER_DUP_ENTRY') throw e;
@@ -67,7 +109,14 @@ router.post('/', wrap(async (req, res) => {
       if (attempt >= 4) throw e;
     }
   }
-  res.status(201).json({ reference: data.reference, status: 'Pending' });
+  res.status(201).json({ reference: data.reference, status: 'Pending', travellers: attachment ? attachment.row_count : null });
+}));
+// Blank sheet with the expected columns, so requestors know what to fill in.
+router.get('/public/travellers-template', wrap(async (req, res) => {
+  const workbook = await buildWorkbook('Travellers', TRAVELLER_TEMPLATE_COLUMNS, []);
+  res.set('Content-Type', TRAVELLER_LIST_TYPES.xlsx);
+  res.set('Content-Disposition', 'attachment; filename="travellers-template.xlsx"');
+  res.send(workbook);
 }));
 // Public board of journeys that have not finished yet, so a requestor can join an existing trip
 // instead of raising a duplicate. Only non-identifying columns are selected: mobile numbers,
@@ -153,8 +202,10 @@ router.get('/', wrap(async (req, res) => {
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const count = await db.get(`SELECT COUNT(*) AS total FROM transport_requests r ${where}`, args);
   const total = Number(count.total);
-  const rows = await db.query(`SELECT r.*, m.status AS message_status, m.message, m.provider_response, m.updated_at AS message_updated_at
-    FROM transport_requests r LEFT JOIN transport_request_messages m ON m.request_id=r.id ${where}
+  const rows = await db.query(`SELECT r.*, m.status AS message_status, m.message, m.provider_response, m.updated_at AS message_updated_at,
+      a.file_name AS traveller_file, a.row_count AS traveller_rows
+    FROM transport_requests r LEFT JOIN transport_request_messages m ON m.request_id=r.id
+    LEFT JOIN transport_request_attachments a ON a.request_id=r.id ${where}
     ORDER BY r.created_at DESC, r.id DESC LIMIT ${PAGE_SIZE} OFFSET ?`, [...args, (page - 1) * PAGE_SIZE]);
   res.json({ rows, total, page, pageSize: PAGE_SIZE, totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE)) });
 }));
@@ -179,6 +230,22 @@ router.get('/:id/vehicles', wrap(async (req, res) => {
   if (!r) throw fail('Request not found.', 404);
   const vehicles = await db.query(`SELECT b.* FROM buses b WHERE ${freeSql} ORDER BY b.bus_number`, availabilityArgs(r));
   res.json(vehicles.map(b => ({ ...b, seating_capacity: Number(b.seating_capacity) })));
+}));
+// The incharge reads the attached traveller list either as rows in the review dialog
+// (?format=json) or as the original file.
+router.get('/:id/travellers', wrap(async (req, res) => {
+  const a = await db.get(`SELECT a.*, r.reference FROM transport_request_attachments a
+    JOIN transport_requests r ON r.id=a.request_id WHERE a.request_id=?`, [req.params.id]);
+  if (!a) throw fail('No traveller list is attached to this request.', 404);
+  if (req.query.format === 'json') {
+    const { headers, rows } = await parseUpload(a.content, a.file_name);
+    const columns = headers.filter(Boolean);
+    return res.json({ file_name: a.file_name, row_count: a.row_count, columns, rows: rows.slice(0, 500).map(row => columns.map(col => row[col] || '')) });
+  }
+  const ext = a.mime_type === TRAVELLER_LIST_TYPES.csv ? 'csv' : 'xlsx';
+  res.set('Content-Type', a.mime_type);
+  res.set('Content-Disposition', `attachment; filename="travellers-${a.reference.replace(/[^\w.-]/g, '_')}.${ext}"`);
+  res.send(a.content);
 }));
 async function notify(id) {
   const claim = await db.run(`UPDATE transport_request_messages SET status='Sending', attempts=attempts+1, updated_at=NOW()
@@ -247,3 +314,4 @@ router.post('/:id/retry', wrap(async (req, res) => {
 }));
 module.exports = router;
 module.exports.validate = validate;
+module.exports.resetSubmissionLimits = () => limits.clear();

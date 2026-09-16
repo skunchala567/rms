@@ -205,6 +205,20 @@ CREATE TABLE IF NOT EXISTS transport_request_messages (
  CONSTRAINT fk_request_message FOREIGN KEY (request_id) REFERENCES transport_requests(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Traveller list (Excel/CSV) attached when more than two persons travel. The file is kept
+-- inline so the deploy needs no shared upload directory; requests cascade-delete it.
+CREATE TABLE IF NOT EXISTS transport_request_attachments (
+ id INT AUTO_INCREMENT PRIMARY KEY,
+ request_id INT NOT NULL UNIQUE,
+ file_name VARCHAR(255) NOT NULL,
+ mime_type VARCHAR(100) NOT NULL,
+ size_bytes INT NOT NULL,
+ row_count INT NOT NULL,
+ content LONGBLOB NOT NULL,
+ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ CONSTRAINT fk_request_attachment FOREIGN KEY (request_id) REFERENCES transport_requests(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS google_maps_settings (
  id TINYINT PRIMARY KEY,
  browser_key VARCHAR(200) NOT NULL DEFAULT '',

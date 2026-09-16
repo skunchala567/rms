@@ -13,15 +13,26 @@ const db = require('../db/database');
 const { signToken } = require('../middleware/auth');
 const router = require('../routes/transport-requests');
 const wa = require('../services/whatsapp');
+const { buildWorkbook } = require('../services/excel');
 let server, base, bus, admin, entry, administrator;
-const payload = () => ({ submission_key: crypto.randomUUID(), requestor_name: 'Test requestor', mobile: '+919876543210', subject: 'Test journey', reason: 'Detailed test reason', persons: 4, origin_name: 'School', destination_name: 'Museum', from_lat: 17.38, from_lng: 78.48, to_lat: 17.40, to_lng: 78.49, travel_at: '2090-01-01T04:30:00Z', end_at: '2090-01-01T08:30:00Z', trip_type: 'Round trip' });
-async function request(path, method = 'GET', body, token) {
-  const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined });
+const payload = () => ({ submission_key: crypto.randomUUID(), requestor_name: 'Test requestor', mobile: '+919876543210', subject: 'Test journey', reason: 'Detailed test reason', persons: 2, origin_name: 'School', destination_name: 'Museum', from_lat: 17.38, from_lng: 78.48, to_lat: 17.40, to_lng: 78.49, travel_at: '2090-01-01T04:30:00Z', end_at: '2090-01-01T08:30:00Z', trip_type: 'Round trip' });
+// Sends JSON, or multipart when a traveller list file is attached (as the browser form does).
+async function request(path, method = 'GET', body, token, file) {
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  let payload;
+  if (file) {
+    payload = new FormData();
+    for (const [key, value] of Object.entries(body)) payload.append(key, String(value));
+    payload.append('travellers', new Blob([file.content], { type: file.type || 'application/octet-stream' }), file.name);
+  } else if (body) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
+  const response = await fetch(base + path, { method, headers, body: payload });
   return { status: response.status, body: await response.json() };
 }
+const travellerColumns = [{ header: 'Name', key: 'name' }, { header: 'Class', key: 'group' }];
+const travellerSheet = async (count, name = 'travellers.xlsx') => ({ name, content: await buildWorkbook('Travellers', travellerColumns, Array.from({ length: count }, (_, i) => ({ name: `Traveller ${i + 1}`, group: 'X' }))) });
 async function create(overrides = {}) {
   const data = { ...payload(), ...overrides };
-  const response = await request('/', 'POST', data);
+  const response = await request('/', 'POST', data, undefined, data.persons > 2 ? await travellerSheet(data.persons) : undefined);
   assert.equal(response.status, 201, JSON.stringify(response.body));
   return db.get('SELECT * FROM transport_requests WHERE reference=?', [response.body.reference]);
 }
@@ -85,6 +96,36 @@ test('rejection requires a reason and renders a separate notification', async ()
   const message = await db.get('SELECT * FROM transport_request_messages WHERE request_id=?', [r.id]);
   assert.equal((await request(`/${r.id}/retry`, 'POST', {}, administrator)).status, 200);
   assert.match(message.message, /No vehicles available/); assert.match(message.message, /rejected/);
+});
+test('groups above two persons must attach a readable traveller list the incharge can view', async () => {
+  router.resetSubmissionLimits(); // this test alone makes several submissions from one IP
+  const group = { ...payload(), persons: 3 };
+  const missing = await request('/', 'POST', group);
+  assert.equal(missing.status, 400); assert.match(missing.body.error, /Attach the list of travellers/);
+  assert.equal((await request('/', 'POST', group, undefined, { name: 'list.txt', content: 'a,b' })).status, 400);
+  assert.equal((await request('/', 'POST', group, undefined, { name: 'broken.xlsx', content: 'not a workbook' })).status, 400);
+  assert.equal((await request('/', 'POST', group, undefined, await travellerSheet(0, 'empty.xlsx'))).status, 400);
+  const sheet = await travellerSheet(3, 'Class 7B list.xlsx');
+  const saved = await request('/', 'POST', group, undefined, sheet);
+  assert.equal(saved.status, 201, JSON.stringify(saved.body)); assert.equal(saved.body.travellers, 3);
+  const r = await db.get('SELECT * FROM transport_requests WHERE reference=?', [saved.body.reference]);
+  const stored = await db.get('SELECT * FROM transport_request_attachments WHERE request_id=?', [r.id]);
+  assert.equal(stored.file_name, 'Class 7B list.xlsx'); assert.equal(Number(stored.row_count), 3); assert.ok(Buffer.from(stored.content).equals(sheet.content));
+  // Only the authenticated incharge can read it, as a file or as rows for the review dialog.
+  assert.equal((await fetch(`${base}/${r.id}/travellers`)).status, 401);
+  const download = await fetch(`${base}/${r.id}/travellers`, { headers: { Authorization: `Bearer ${admin}` } });
+  assert.equal(download.status, 200); assert.match(download.headers.get('content-type'), /spreadsheetml/); assert.match(download.headers.get('content-disposition'), /travellers-\d{4}\.xlsx/);
+  assert.ok(Buffer.from(await download.arrayBuffer()).equals(sheet.content));
+  const preview = await request(`/${r.id}/travellers?format=json`, 'GET', undefined, admin);
+  assert.deepEqual(preview.body.columns, ['Name', 'Class']); assert.deepEqual(preview.body.rows[2], ['Traveller 3', 'X']);
+  const listed = (await request('/?status=All&search=' + saved.body.reference, 'GET', undefined, admin)).body.rows[0];
+  assert.equal(listed.traveller_file, 'Class 7B list.xlsx'); assert.equal(Number(listed.traveller_rows), 3); assert.equal(listed.content, undefined);
+  assert.equal((await request(`/${(await create()).id}/travellers`, 'GET', undefined, admin)).status, 404);
+  // CSV is accepted too, and the public template is served without a login.
+  const csv = await request('/', 'POST', { ...payload(), persons: 4 }, undefined, { name: 'list.csv', type: 'text/csv', content: 'Name,Class\nA,1\nB,1\nC,2\nD,2\n' });
+  assert.equal(csv.status, 201, JSON.stringify(csv.body)); assert.equal(csv.body.travellers, 4);
+  const template = await fetch(`${base}/public/travellers-template`);
+  assert.equal(template.status, 200); assert.match(template.headers.get('content-type'), /spreadsheetml/);
 });
 test('availability returns free buses for combined allocation and excludes school trip bookings', async () => {
   const large = await create({ persons: 11, travel_at: '2090-02-01T04:30:00Z', end_at: '2090-02-01T08:30:00Z' });

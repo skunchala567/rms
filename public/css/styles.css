@@ -803,3 +803,12 @@ tbody tr.is-new > td { background: var(--accent-soft); box-shadow: inset 3px 0 0
   .transport-public .scope-note .btn-row { width: 100%; }
   .transport-public .scope-note .btn-row .btn { flex: 1; justify-content: center; }
 }
+/* Traveller list: attached for larger groups, previewed in the review modal */
+.traveller-list-field input[type="file"] { padding: 6px 10px; }
+.traveller-list-field { padding: 12px 14px; border: 1px dashed var(--accent); border-radius: var(--radius-sm); background: var(--accent-soft); }
+.traveller-list-field .note { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-muted); }
+.traveller-flag { display: inline-flex; align-items: center; gap: 3px; }
+.traveller-preview { margin-top: 8px; }
+.traveller-preview .table-wrap { max-height: 220px; overflow: auto; }
+.traveller-preview table { font-size: 12px; }
+.traveller-preview th, .traveller-preview td { padding: 5px 8px; white-space: nowrap; }

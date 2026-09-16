@@ -19,6 +19,9 @@
   };
   // The public board deliberately speaks in requestor terms rather than review terms.
   const PUBLIC_STATUS = { Accepted: { label: 'Confirmed', color: 'green' }, Pending: { label: 'Pending review', color: 'amber' } };
+  // Mirrors the server rule: larger groups must attach the list of who is travelling.
+  const TRAVELLER_LIST_THRESHOLD = 2;
+  const TRAVELLER_LIST_MAX_MB = 5;
   const requestFormHtml = () => `<form id="transport-public-form">
         <div class="section-head"><div class="head-text"><h2 class="flush">New transport request</h2></div>
           <div class="btn-row"><button type="button" class="btn secondary sm" id="cancel-request">${Icons.svg('x', 14)} Cancel</button></div></div>
@@ -29,6 +32,12 @@
           ${field('Pickup / from location name', 'origin_name', 'text', 'maxlength="200"')}
           ${field('Destination name', 'destination_name', 'text', 'maxlength="200"')}
           ${field('Subject', 'subject', 'text', 'maxlength="200"')}
+        </div>
+        <div class="field traveller-list-field" id="traveller-list-field" hidden>
+          <div class="location-heading"><label for="tr-travellers">List of students / employees travelling (Excel .xlsx or CSV)</label>
+            <button type="button" class="btn secondary sm" id="download-template">${Icons.svg('download', 14)} Download sample Excel template</button></div>
+          <input id="tr-travellers" name="travellers" type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled>
+          <p class="note">Required when more than ${TRAVELLER_LIST_THRESHOLD} persons travel. Fill the sample template with one row per traveller (name, class/department, ID and mobile) and upload it here. Maximum ${TRAVELLER_LIST_MAX_MB} MB.</p>
         </div>
         <div class="field"><label for="tr-reason">Detailed reason for travel</label><textarea id="tr-reason" name="reason" required maxlength="5000" rows="2"></textarea></div>
         <div class="form-grid three">
@@ -243,10 +252,29 @@
       const form = panel.querySelector('form');
       const result = panel.querySelector('#request-result');
       panel.querySelector('#cancel-request').addEventListener('click', closeForm);
+      // A disabled file input stays out of FormData, so a list chosen before the headcount was
+      // lowered is never sent.
+      const travellerField = panel.querySelector('#traveller-list-field');
+      const travellerInput = panel.querySelector('#tr-travellers');
+      const syncTravellerList = () => {
+        const needed = Number(form.elements.persons.value) > TRAVELLER_LIST_THRESHOLD;
+        travellerField.hidden = !needed; travellerInput.disabled = !needed; travellerInput.required = needed;
+      };
+      form.elements.persons.addEventListener('input', syncTravellerList);
+      panel.querySelector('#download-template').addEventListener('click', () =>
+        API.download('/transport-requests/public/travellers-template', 'travellers-template.xlsx').catch(() => toast('Could not download the template. Please try again.', 'error')));
       form.addEventListener('submit', async e => {
         e.preventDefault();
         if (!form.reportValidity()) return;
         const data = Object.fromEntries(new FormData(form));
+        const travellers = data.travellers instanceof File && data.travellers.size ? data.travellers : null;
+        delete data.travellers;
+        if (travellers && travellers.size > TRAVELLER_LIST_MAX_MB * 1024 * 1024) {
+          result.textContent = `The traveller list must be ${TRAVELLER_LIST_MAX_MB} MB or smaller.`;
+          result.className = 'alert error';
+          travellerField.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
         if (['from_lat', 'from_lng', 'to_lat', 'to_lng'].some(name => !data[name])) {
           result.textContent = 'Please select both pickup and destination on the map or from search results.';
           result.className = 'alert error';
@@ -258,7 +286,13 @@
         data.end_at = new Date(data.end_at + ':00+05:30').toISOString();
         const button = panel.querySelector('#submit-transport'); button.disabled = true; button.textContent = 'Submitting…'; result.textContent = '';
         try {
-          const saved = await API.post('/transport-requests', data);
+          let saved;
+          if (travellers) {
+            const body = new FormData();
+            for (const [name, value] of Object.entries(data)) body.append(name, value);
+            body.append('travellers', travellers, travellers.name);
+            saved = await API.postForm('/transport-requests', body);
+          } else saved = await API.post('/transport-requests', data);
           closeForm();
           outcome.innerHTML = `<div class="alert success">${Icons.svg('checkCircle', 16)}<div><strong>Request submitted.</strong> Your reference is <strong>${esc(saved.reference)}</strong> — please save it. Your request is pending review and now appears in the list below; the transport team will send the decision to your WhatsApp number.</div></div>`;
           state.highlight = saved.reference;
@@ -316,7 +350,7 @@
         <td><b>${esc(r.reference)}</b><br><span class="muted">${esc(dayOnly(r.created_at))}</span></td>
         <td class="cell-wrap">${esc(r.subject)}</td>
         <td>${esc(r.requestor_name)}<br><span class="muted">${esc(r.mobile)}</span></td>
-        <td class="cell-wrap"><span class="request-route">${locationLink(r.origin_name, r.from_lat, r.from_lng)} ${Icons.svg('arrowRight', 13)} ${locationLink(r.destination_name, r.to_lat, r.to_lng)}</span><br><span class="trip-meta">${UI.badge(r.trip_type, r.trip_type === 'Drop' ? 'sand' : 'blue')}<span class="muted">${esc(r.persons)} pax</span></span></td>
+        <td class="cell-wrap"><span class="request-route">${locationLink(r.origin_name, r.from_lat, r.from_lng)} ${Icons.svg('arrowRight', 13)} ${locationLink(r.destination_name, r.to_lat, r.to_lng)}</span><br><span class="trip-meta">${UI.badge(r.trip_type, r.trip_type === 'Drop' ? 'sand' : 'blue')}<span class="muted">${esc(r.persons)} pax</span>${r.traveller_file ? `<span class="muted traveller-flag" title="Traveller list attached: ${esc(r.traveller_file)}">${Icons.svg('listChecks', 12)} ${esc(r.traveller_rows)}</span>` : ''}</span></td>
         <td>${esc(shortDate(r.travel_at))}<br><span class="muted">to ${esc(shortDate(r.end_at))}</span></td>
         <td>${r.vehicle_number ? `<b>${esc(r.vehicle_number)}</b>${r.driver_name ? '<br><span class="muted">' + esc(r.driver_name) + '</span>' : ''}` : '<span class="muted">-</span>'}</td>
         <td>${statusChip(r.status)}<br><span class="muted msg-status" title="WhatsApp notification">${Icons.svg('message', 12)} ${messageLabel(r.message_status)}</span></td>
@@ -380,6 +414,9 @@
           ${detail('From', locationLink(r.origin_name, r.from_lat, r.from_lng))}
           ${detail('To', locationLink(r.destination_name, r.to_lat, r.to_lng))}
           ${detail('Reason for travel', `<span class="transport-reason">${esc(r.reason)}</span>`, true)}
+          ${detail('Traveller list', r.traveller_file
+    ? `<button type="button" class="btn secondary sm" id="download-travellers">${Icons.svg('download', 14)} ${esc(r.traveller_file)}</button> <span class="muted">${esc(r.traveller_rows)} ${Number(r.traveller_rows) === 1 ? 'row' : 'rows'}</span><div class="traveller-preview" id="traveller-preview">${UI.spinner()}</div>`
+    : `<span class="muted">${Number(r.persons) > TRAVELLER_LIST_THRESHOLD ? 'Not attached' : 'Not required for ' + esc(r.persons) + ' persons'}</span>`, true)}
         </div>
         ${r.status === 'Pending' ? `<form id="decision-form"><div class="field"><label for="decision-status">Decision</label><select id="decision-status" name="status"><option value="Accepted">Accept and allocate vehicles</option><option value="Rejected">Reject with reason</option></select></div>
           <div id="allocation-fields"><p class="note">Select enough available vehicles to cover all ${esc(r.persons)} travellers. Vehicles with overlapping bookings or school trips are excluded.</p>
@@ -397,6 +434,16 @@
         <pre class="transport-message">${esc(r.message || '')}</pre>
         ${r.message_status !== 'Sent' ? '<p class="note">If a previous attempt timed out, check provider history before retrying to avoid a duplicate message.</p><button class="btn secondary" id="retry-notification">Retry WhatsApp</button>' : ''}`}</div>`,
         onMount: (el, close) => {
+          const download = el.querySelector('#download-travellers');
+          if (download) {
+            download.addEventListener('click', () => API.download(`/transport-requests/${r.id}/travellers`, r.traveller_file).catch(e => toast(e.message, 'error')));
+            const preview = el.querySelector('#traveller-preview');
+            API.get(`/transport-requests/${r.id}/travellers?format=json`).then(list => {
+              const shown = list.rows.length;
+              preview.innerHTML = `<div class="table-wrap"><table><thead><tr><th>#</th>${list.columns.map(col => `<th>${esc(col)}</th>`).join('')}</tr></thead>
+                <tbody>${list.rows.map((row, i) => `<tr><td>${i + 1}</td>${row.map(cell => `<td>${esc(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>${shown < list.row_count ? `<p class="muted">Showing ${shown} of ${esc(list.row_count)} rows; download the file for the full list.</p>` : ''}`;
+            }).catch(e => { preview.innerHTML = `<p class="field-error">${esc(e.message)}</p>`; });
+          }
           if (r.status !== 'Pending') {
             const retry = el.querySelector('#retry-notification');
             if (retry) retry.onclick = async () => { retry.disabled = true; try { const result = await API.post(`/transport-requests/${r.id}/retry`, {}); toast(`WhatsApp: ${result.status}`); close(); load(); } catch (e) { toast(e.message, 'error'); retry.disabled = false; } };
