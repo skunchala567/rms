@@ -205,18 +205,29 @@ CREATE TABLE IF NOT EXISTS transport_request_messages (
  CONSTRAINT fk_request_message FOREIGN KEY (request_id) REFERENCES transport_requests(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Traveller list (Excel/CSV) attached when more than two persons travel. The file is kept
--- inline so the deploy needs no shared upload directory; requests cascade-delete it.
+-- Files attached to a request, one row per kind: the traveller list (Excel/CSV) required for
+-- larger groups, and the reporting head's approval (PDF/image). Files are kept inline so the
+-- deploy needs no shared upload directory; requests cascade-delete them.
 CREATE TABLE IF NOT EXISTS transport_request_attachments (
  id INT AUTO_INCREMENT PRIMARY KEY,
- request_id INT NOT NULL UNIQUE,
+ request_id INT NOT NULL,
+ kind ENUM('travellers','approval') NOT NULL DEFAULT 'travellers',
  file_name VARCHAR(255) NOT NULL,
  mime_type VARCHAR(100) NOT NULL,
  size_bytes INT NOT NULL,
- row_count INT NOT NULL,
+ row_count INT NOT NULL DEFAULT 0,
  content LONGBLOB NOT NULL,
  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE KEY uniq_request_attachment (request_id, kind),
  CONSTRAINT fk_request_attachment FOREIGN KEY (request_id) REFERENCES transport_requests(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- How the public request form treats the reporting head's approval document.
+CREATE TABLE IF NOT EXISTS transport_request_settings (
+ id TINYINT PRIMARY KEY,
+ approval_mode ENUM('Hidden','Optional','Required') NOT NULL DEFAULT 'Optional',
+ updated_by INT,
+ updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS google_maps_settings (

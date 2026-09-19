@@ -257,6 +257,8 @@ See `db/schema.sql` for the full DDL. Tables:
 - **trip_assignments** — `student_id, trip_date, route_number, bus_id, assigned_by` (one row per student per date)
 - **route_replacement_log** — `old_route, new_route, affected_count, updated_by_name, created_at`
 - **notification_log** — `student_name, mobile, bus_number, tracking_link, message, status, provider_response, sent_at`
+- **transport_request_attachments** — `request_id, kind(travellers|approval), file_name, mime_type, size_bytes, row_count, content` (one row per kind per request)
+- **transport_request_settings** — `approval_mode(Hidden|Optional|Required)` (single row, id `1`)
 
 Occupancy is **derived** at query time (active students whose `route_number` matches a
 bus's route), so it always reflects current data.
@@ -349,7 +351,9 @@ To reset all data and re-seed (development only): `npm run reset-db`.
 Open `/#/request-transport` or use **Request adhoc transport** on the login screen.
 No account is required. The form collects requestor name and WhatsApp number,
 subject, detailed reason, passenger count, pickup and destination names, map pins,
-travel time, expected end/return time, and Drop/Round trip. All entered travel times
+travel time, expected end/return time, and Drop/Round trip. Depending on the headcount
+and on Settings, it also collects a traveller list and the reporting head's approval
+document (see **Files attached to a request**). All entered travel times
 are **India Standard Time (Asia/Kolkata)**; the database stores UTC. A reference is
 shown after submission. Retrying the same form submission does not create duplicates.
 
@@ -373,6 +377,44 @@ notifications can be retried from request details. Interrupted sends can be retr
 after two minutes. Check provider history after a timeout before retrying, because
 SmartPing may have accepted a request whose response was lost. There is no automatic
 background retry or delivery receipt webhook in this workflow.
+
+### Files attached to a request
+
+A request can carry two files, both stored inline in `transport_request_attachments`
+(one row per `kind`) and deleted with the request:
+
+- **Traveller list** (`travellers`) — required when more than 2 persons travel.
+  `.xlsx` or `.csv`, up to 5 MB. The form offers a sample template
+  (`GET /api/transport-requests/public/travellers-template`). The file is parsed on
+  submission, so a workbook the incharge cannot open is rejected at the door; a
+  request with no rows below the header is refused.
+- **Approval document** (`approval`) — the reporting head's sign-off. PDF, JPG, PNG
+  or WEBP, up to 5 MB. The file's own signature bytes decide its type, so renaming a
+  script to `.pdf` does not get it in.
+
+Both are readable only by Admins and Transport Incharges, from the request's review
+dialog: the traveller list as a table preview plus download
+(`GET /api/transport-requests/:id/travellers`), the approval as a download, with
+images shown inline (`GET /api/transport-requests/:id/approval`). Stored files are
+always served as downloads with `X-Content-Type-Options: nosniff`, never rendered
+on this origin.
+
+### Transport request settings
+
+Open **Settings → Transport requests** to choose how the public form treats the
+approval document. Settings permission is required to read or change it, and the
+choice applies to newly opened or refreshed public forms without a restart:
+
+| Mode | Public form | Submission |
+|---|---|---|
+| `Hidden` | field not shown | a document sent anyway is refused |
+| `Optional` (default) | field shown, marked optional | accepted with or without |
+| `Required` | field shown and mandatory | refused without a document |
+
+Switching to `Hidden` or `Optional` does not remove documents already attached to
+existing requests. The form reads its own rules from
+`GET /api/transport-requests/public/config` (no authentication), but the server
+enforces the mode on every submission regardless of what the form sent.
 
 ### SmartPing campaign setup
 

@@ -215,6 +215,18 @@ async function columnNullable(table, column) {
   return row ? String(row.is_nullable || '').toUpperCase() === 'YES' : false;
 }
 
+async function uniqueIndexOn(table, column) {
+  const row = await _get(pool, `
+    SELECT INDEX_NAME AS name
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND NON_UNIQUE = 0 AND INDEX_NAME <> 'PRIMARY'
+    GROUP BY INDEX_NAME
+    HAVING COUNT(*) = 1 AND MAX(COLUMN_NAME) = ?
+    LIMIT 1
+  `, [table, column]);
+  return row ? row.name : '';
+}
+
 async function runMigrations() {
   if (await tableExists('users')) {
     const roleType = String(await columnType('users', 'role') || '').toLowerCase();
@@ -241,6 +253,21 @@ async function runMigrations() {
       if (String(await columnType('transport_requests', column)).toLowerCase() !== 'text') {
         await pool.query(`ALTER TABLE transport_requests MODIFY ${column} TEXT NULL`);
       }
+    }
+  }
+
+  // A request now carries two kinds of file: the traveller list and the approval document.
+  // Older installs have one row per request, so widen the key before a second kind can arrive.
+  if (await tableExists('transport_request_attachments')) {
+    if (!(await columnType('transport_request_attachments', 'kind'))) {
+      await pool.query("ALTER TABLE transport_request_attachments ADD COLUMN kind ENUM('travellers','approval') NOT NULL DEFAULT 'travellers' AFTER request_id");
+      // The approval document has no rows to count, so row_count needs a default of its own.
+      await pool.query('ALTER TABLE transport_request_attachments MODIFY row_count INT NOT NULL DEFAULT 0');
+      // The new key goes in before the old one comes out: request_id leads both, so the foreign
+      // key is never left without an index to lean on.
+      await pool.query('ALTER TABLE transport_request_attachments ADD UNIQUE KEY uniq_request_attachment (request_id, kind)');
+      const stale = await uniqueIndexOn('transport_request_attachments', 'request_id');
+      if (stale) await pool.query(`ALTER TABLE transport_request_attachments DROP INDEX \`${stale}\``);
     }
   }
 

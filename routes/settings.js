@@ -108,6 +108,23 @@ router.put('/whatsapp', requirePageAccess('settings'), async (req, res, next) =>
   }
 });
 
+// Adhoc transport request form options (currently the reporting head's approval document).
+router.get('/transport-requests', requirePageAccess('settings'), async (req, res, next) => {
+  try {
+    const config = require('../services/transport-request-config');
+    res.set('Cache-Control', 'no-store').json({ ...(await config.getRequestSettings()), approvalModes: config.APPROVAL_MODES });
+  } catch (err) { next(err); }
+});
+router.put('/transport-requests', requirePageAccess('settings'), async (req, res, next) => {
+  try {
+    const config = require('../services/transport-request-config');
+    res.set('Cache-Control', 'no-store').json({ ...(await config.saveRequestSettings(req.body || {}, req.user.id)), approvalModes: config.APPROVAL_MODES });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
 // Google Maps configuration follows the existing Settings permission.
 router.get('/google-maps', requirePageAccess('settings'), async (req, res, next) => {
   try {

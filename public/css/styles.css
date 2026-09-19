@@ -804,9 +804,12 @@ tbody tr.is-new > td { background: var(--accent-soft); box-shadow: inset 3px 0 0
   .transport-public .scope-note .btn-row .btn { flex: 1; justify-content: center; }
 }
 /* Traveller list: attached for larger groups, previewed in the review modal */
-.traveller-list-field input[type="file"] { padding: 6px 10px; }
-.traveller-list-field { padding: 12px 14px; border: 1px dashed var(--accent); border-radius: var(--radius-sm); background: var(--accent-soft); }
-.traveller-list-field .note { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-muted); }
+.traveller-list-field input[type="file"], .approval-document-field input[type="file"] { padding: 6px 10px; }
+.traveller-list-field, .approval-document-field { padding: 12px 14px; border: 1px dashed var(--accent); border-radius: var(--radius-sm); background: var(--accent-soft); }
+.traveller-list-field .note, .approval-document-field .note { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-muted); }
+.approval-preview { margin-top: 8px; }
+.approval-preview img { display: block; max-width: 100%; max-height: 320px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; }
+.approval-preview p { margin: 4px 0 0; font-size: 12px; }
 .traveller-flag { display: inline-flex; align-items: center; gap: 3px; }
 .traveller-preview { margin-top: 8px; }
 .traveller-preview .table-wrap { max-height: 220px; overflow: auto; }

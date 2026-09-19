@@ -17,17 +17,27 @@ const { buildWorkbook } = require('../services/excel');
 let server, base, bus, admin, entry, administrator;
 const payload = () => ({ submission_key: crypto.randomUUID(), requestor_name: 'Test requestor', mobile: '+919876543210', subject: 'Test journey', reason: 'Detailed test reason', persons: 2, origin_name: 'School', destination_name: 'Museum', from_lat: 17.38, from_lng: 78.48, to_lat: 17.40, to_lng: 78.49, travel_at: '2090-01-01T04:30:00Z', end_at: '2090-01-01T08:30:00Z', trip_type: 'Round trip' });
 // Sends JSON, or multipart when a traveller list file is attached (as the browser form does).
-async function request(path, method = 'GET', body, token, file) {
+async function request(path, method = 'GET', body, token, file, approval) {
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
   let payload;
-  if (file) {
+  if (file || approval) {
     payload = new FormData();
     for (const [key, value] of Object.entries(body)) payload.append(key, String(value));
-    payload.append('travellers', new Blob([file.content], { type: file.type || 'application/octet-stream' }), file.name);
+    for (const [field, upload] of [['travellers', file], ['approval', approval]]) {
+      if (upload) payload.append(field, new Blob([upload.content], { type: upload.type || 'application/octet-stream' }), upload.name);
+    }
   } else if (body) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
   const response = await fetch(base + path, { method, headers, body: payload });
   return { status: response.status, body: await response.json() };
 }
+// Smallest files that still carry a real signature, which is what the server checks.
+const PDF_BYTES = Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n', 'latin1');
+const PNG_BYTES = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 7)]);
+const setApprovalMode = async approvalMode => {
+  const saved = await request('/settings/transport-requests', 'PUT', { approvalMode }, administrator);
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  return saved.body;
+};
 const travellerColumns = [{ header: 'Name', key: 'name' }, { header: 'Class', key: 'group' }];
 const travellerSheet = async (count, name = 'travellers.xlsx') => ({ name, content: await buildWorkbook('Travellers', travellerColumns, Array.from({ length: count }, (_, i) => ({ name: `Traveller ${i + 1}`, group: 'X' }))) });
 async function create(overrides = {}) {
@@ -235,4 +245,57 @@ test('WhatsApp settings protect credentials and drive all three send flows witho
   await request('/settings/whatsapp', 'PUT', { ...settings, apiKey: '', enabled: false, clearApiKey: true }, administrator);
   assert.equal(await wa.isEnabled(), false);
   assert.equal((await request('/settings/whatsapp', 'GET', undefined, administrator)).body.hasApiKey, false);
+});
+
+test('the approval document follows the Settings mode and only the incharge can read it', async () => {
+  router.resetSubmissionLimits(); // this test alone makes several submissions from one IP
+  assert.equal((await request('/public/config')).body.approval.mode, 'Optional'); // default for a fresh install
+  assert.equal((await request('/settings/transport-requests', 'PUT', { approvalMode: 'Sometimes' }, administrator)).status, 400);
+  assert.equal((await request('/settings/transport-requests', 'GET', undefined, entry)).status, 403);
+
+  // Optional: a request goes through with or without a document.
+  assert.equal((await request('/', 'POST', payload())).status, 201);
+  const signed = await request('/', 'POST', payload(), undefined, undefined, { name: 'HOD approval.pdf', type: 'application/pdf', content: PDF_BYTES });
+  assert.equal(signed.status, 201, JSON.stringify(signed.body));
+  assert.equal(signed.body.approval, 'HOD approval.pdf');
+  const r = await db.get('SELECT * FROM transport_requests WHERE reference=?', [signed.body.reference]);
+  const stored = await db.get("SELECT * FROM transport_request_attachments WHERE request_id=? AND kind='approval'", [r.id]);
+  assert.equal(stored.mime_type, 'application/pdf');
+  assert.ok(Buffer.from(stored.content).equals(PDF_BYTES));
+
+  // Contents decide the type, not the extension or the browser's declared MIME.
+  const lying = await request('/', 'POST', payload(), undefined, undefined, { name: 'approval.pdf', type: 'application/pdf', content: 'just text' });
+  assert.equal(lying.status, 400); assert.match(lying.body.error, /not a valid PDF/);
+  assert.equal((await request('/', 'POST', payload(), undefined, undefined, { name: 'approval.docx', content: 'anything' })).status, 400);
+
+  // Only the incharge can fetch it, and it is served as a download that browsers will not sniff.
+  assert.equal((await fetch(`${base}/${r.id}/approval`)).status, 401);
+  const download = await fetch(`${base}/${r.id}/approval`, { headers: { Authorization: `Bearer ${admin}` } });
+  assert.equal(download.status, 200);
+  assert.equal(download.headers.get('content-type'), 'application/pdf');
+  assert.equal(download.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(download.headers.get('content-disposition'), /approval-\d{4}\.pdf/);
+  assert.ok(Buffer.from(await download.arrayBuffer()).equals(PDF_BYTES));
+  const listed = (await request('/?status=All&search=' + signed.body.reference, 'GET', undefined, admin)).body.rows[0];
+  assert.equal(listed.approval_file, 'HOD approval.pdf'); assert.equal(listed.approval_mime, 'application/pdf');
+  assert.equal((await request(`/${(await create()).id}/approval`, 'GET', undefined, admin)).status, 404);
+
+  // Required: the same submission is now refused without a document, and images are accepted.
+  await setApprovalMode('Required');
+  assert.equal((await request('/public/config')).body.approval.mode, 'Required');
+  const missing = await request('/', 'POST', payload());
+  assert.equal(missing.status, 400); assert.match(missing.body.error, /Attach the approval document/);
+  const photo = await request('/', 'POST', payload(), undefined, undefined, { name: 'approval.png', type: 'image/png', content: PNG_BYTES });
+  assert.equal(photo.status, 201, JSON.stringify(photo.body));
+  // A large group can carry both files at once.
+  const both = await request('/', 'POST', { ...payload(), persons: 3 }, undefined, await travellerSheet(3), { name: 'approval.png', type: 'image/png', content: PNG_BYTES });
+  assert.equal(both.status, 201, JSON.stringify(both.body));
+  assert.equal(both.body.travellers, 3); assert.equal(both.body.approval, 'approval.png');
+
+  // Hidden: the field is gone, and anything sent to it is turned away.
+  await setApprovalMode('Hidden');
+  assert.equal((await request('/public/config')).body.approval.mode, 'Hidden');
+  assert.equal((await request('/', 'POST', payload())).status, 201);
+  assert.equal((await request('/', 'POST', payload(), undefined, undefined, { name: 'approval.pdf', type: 'application/pdf', content: PDF_BYTES })).status, 400);
+  await setApprovalMode('Optional');
 });

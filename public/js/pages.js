@@ -2190,13 +2190,14 @@
   async function settings(c) {
     c.innerHTML = `
       <div class="section-head">
-        <div><h2>Settings</h2><div class="sub">Manage student dropdowns, user roles, access, and Google Maps.</div></div>
+        <div><h2>Settings</h2><div class="sub">Manage student dropdowns, user roles, access, transport requests, and Google Maps.</div></div>
       </div>
       <div class="tabs">
         ${Object.entries(settingMeta).map(([type, meta], idx) =>
           `<button class="tab ${idx === 0 ? 'active' : ''}" data-setting="${type}">${Icons.svg('settings', 16)} ${esc(meta.label)}</button>`
         ).join('')}
         <button class="tab" data-whatsapp>WhatsApp</button>
+        <button class="tab" data-transport-requests>Transport requests</button>
         <button class="tab" data-google-maps>Google Maps</button>
         <button class="tab" data-access="users">${Icons.svg('shield', 16)} Roles & Access</button>
       </div>
@@ -2220,10 +2221,53 @@
     c.querySelector('[data-whatsapp]').addEventListener('click', e => {
       selectTab(e.currentTarget, Pages.whatsappSettings);
     });
+    c.querySelector('[data-transport-requests]').addEventListener('click', e => {
+      selectTab(e.currentTarget, loadTransportRequestSettings);
+    });
     c.querySelector('[data-google-maps]').addEventListener('click', e => {
       selectTab(e.currentTarget, loadGoogleMapsSettings);
     });
     await selectTab(c.querySelector('[data-setting="class"]'), panel => loadSettingType(panel, 'class'));
+  }
+
+  // What the public request form asks for beyond the journey itself.
+  const APPROVAL_MODE_HELP = {
+    Hidden: 'The upload field is not shown. Requests already holding an approval keep it.',
+    Optional: 'The field is shown. A requestor may submit without attaching anything.',
+    Required: 'A request cannot be submitted until an approval document is attached.',
+  };
+  async function loadTransportRequestSettings(content) {
+    content.innerHTML = spinner();
+    const config = await API.get('/settings/transport-requests');
+    if (!content.isConnected) return;
+    content.innerHTML = `<div class="card"><h2>Adhoc transport request form</h2>
+      <p>Control what the public request form asks for. Changes apply to newly opened or refreshed forms.</p>
+      <form id="transport-request-settings-form">
+        <div class="field"><label for="approval-mode">Approval document from the reporting head</label>
+          <select id="approval-mode" name="approvalMode">${config.approvalModes.map(mode =>
+    `<option value="${esc(mode)}"${mode === config.approvalMode ? ' selected' : ''}>${esc(mode)}</option>`).join('')}</select>
+        </div>
+        <p class="note" id="approval-mode-help">${esc(APPROVAL_MODE_HELP[config.approvalMode] || '')}</p>
+        <p>Requestors may upload a PDF, JPG, PNG or WEBP of up to 5 MB. The transport team can open it from the request's review dialog.</p>
+        <div id="transport-request-save-status" role="status" aria-live="polite">Currently ${esc(config.approvalMode)}${config.updatedAt ? ` · updated ${esc(String(config.updatedAt).replace('T', ' ').slice(0, 16))}` : ' · default'}</div>
+        <div class="btn-row" style="margin-top:16px"><button class="btn" type="submit">Save request form settings</button>
+          <a class="btn secondary" href="/#/request-transport" target="_blank" rel="noopener">Open public form to test</a></div>
+      </form></div>`;
+    const form = content.querySelector('form');
+    const mode = content.querySelector('#approval-mode');
+    const help = content.querySelector('#approval-mode-help');
+    const status = content.querySelector('#transport-request-save-status');
+    mode.onchange = () => { help.textContent = APPROVAL_MODE_HELP[mode.value] || ''; };
+    form.onsubmit = async e => {
+      e.preventDefault();
+      const button = form.querySelector('[type="submit"]'); button.disabled = true;
+      try {
+        const saved = await API.put('/settings/transport-requests', { approvalMode: mode.value });
+        status.textContent = `Saved. The approval document is now ${saved.approvalMode.toLowerCase()} on the public form.`;
+        toast('Transport request settings saved.', 'success');
+      } catch (err) { status.textContent = err.message; toast(err.message, 'error'); }
+      finally { button.disabled = false; }
+    };
   }
 
   async function loadGoogleMapsSettings(content) {

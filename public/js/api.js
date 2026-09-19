@@ -80,6 +80,7 @@
     getToken, getUser, setSession, clearSession, isIncharge, download,
     canAccess, canManageTransportRequests,
     get: (p) => request('GET', p),
+    getBlob: (p) => request('GET', p, null, { blob: true }),
     post: (p, b) => request('POST', p, b),
     put: (p, b) => request('PUT', p, b),
     del: (p) => request('DELETE', p),
