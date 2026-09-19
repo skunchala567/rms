@@ -45,7 +45,11 @@
       e.offline = true;
       throw e;
     }
-    if (resp.status === 401 && !path.startsWith('/auth/login')) {
+    // Only a rejected *session* sends the user to the login page. The public request-transport
+    // page runs without a token, so a 401 there (for example a backend that has not been restarted
+    // after a deploy) must surface as an ordinary error instead of bouncing the visitor to login.
+    const isPublic = path.startsWith('/auth/login') || path.startsWith('/transport-requests/public');
+    if (resp.status === 401 && token && !isPublic) {
       clearSession();
       location.hash = '#/login';
       const e = new Error('Session expired. Please log in again.');
